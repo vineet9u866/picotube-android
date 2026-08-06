@@ -28,6 +28,22 @@ export interface ScrapedVideo {
   views?: string;
   uploaded?: string;
   thumbnail?: string;
+  description?: string;
+}
+
+export interface ScrapedComment {
+  id: string;
+  author: string;
+  text: string;
+  likes?: string;
+  published?: string;
+  avatar?: string;
+  replies?: number;
+}
+
+export interface CommentsResult {
+  comments: ScrapedComment[];
+  nextPageToken?: string;
 }
 
 const BROWSER_HEADERS = {
@@ -113,9 +129,14 @@ function extractJsonObject(html: string, patterns: RegExp[]): any | null {
 /** Walk the JSON tree and collect all video renderer objects. YouTube uses
  * different renderer types on different pages:
  *   - videoRenderer          → search results, watch page related
- *   - compactVideoRenderer   → watch page related sidebar
+ *   - compactVideoRenderer   → watch page related sidebar (older layout)
  *   - gridVideoRenderer      → older channel /videos pages, trending
  *   - richItemRenderer       → newer channel /videos pages (wraps lockupViewModel)
+ *   - lockupViewModel        → newer watch page related sidebar (bare, not
+ *                              wrapped in richItemRenderer)
+ *
+ * For lockupViewModel we normalize to a shape that parseVideoRenderer
+ * understands (see normalizeLockupViewModel).
  */
 function findVideoRenderers(obj: any, acc: any[] = []): any[] {
   if (!obj || typeof obj !== "object") return acc;
@@ -127,10 +148,15 @@ function findVideoRenderers(obj: any, acc: any[] = []): any[] {
   if (obj.compactVideoRenderer) acc.push(obj.compactVideoRenderer);
   if (obj.gridVideoRenderer) acc.push(obj.gridVideoRenderer);
   // Newer YouTube layout wraps videos in richItemRenderer > content > lockupViewModel.
-  // Normalize it to look like a videoRenderer so parseVideoRenderer can handle it.
   if (obj.richItemRenderer?.content?.lockupViewModel) {
-    const lvm = obj.richItemRenderer.content.lockupViewModel;
-    const normalized = normalizeLockupViewModel(lvm);
+    const normalized = normalizeLockupViewModel(obj.richItemRenderer.content.lockupViewModel);
+    if (normalized) acc.push(normalized);
+  }
+  // On the watch page, lockupViewModel appears bare (no richItemRenderer wrapper).
+  // We detect this by checking for a top-level contentId that looks like a
+  // video ID (11-char base64) plus a contentImage — the video lockup signature.
+  if (obj.lockupViewModel?.contentId && obj.lockupViewModel.contentImage?.thumbnailViewModel) {
+    const normalized = normalizeLockupViewModel(obj.lockupViewModel);
     if (normalized) acc.push(normalized);
   }
   for (const v of Object.values(obj)) findVideoRenderers(v, acc);
@@ -138,8 +164,14 @@ function findVideoRenderers(obj: any, acc: any[] = []): any[] {
 }
 
 /**
- * Convert a `lockupViewModel` (newer YouTube channel page format) into a
- * shape that `parseVideoRenderer` understands.
+ * Convert a `lockupViewModel` (newer YouTube channel / watch page format)
+ * into a shape that `parseVideoRenderer` understands.
+ *
+ * YouTube has two slightly different layouts:
+ *   1. Channel /videos page: `lockupMetadataViewModel.metadataRows[]`
+ *   2. Watch page related:    `lockupMetadataViewModel.metadata
+ *                              .contentMetadataViewModel.metadataRows[]`
+ * We check both.
  */
 function normalizeLockupViewModel(lvm: any): any | null {
   try {
@@ -157,30 +189,56 @@ function normalizeLockupViewModel(lvm: any): any | null {
       }
       if (duration) break;
     }
-    // Title and metadata from lockupViewModel.metadata.lockupMetadataViewModel
+
     const meta = lvm.metadata?.lockupMetadataViewModel || {};
     const title = meta.title?.content;
-    const imageMeta = meta.image?.decoratedAvatar?.avatar?.avatarViewModel?.image?.sources?.[0]?.url;
-    // Channel name + subscriber info is in metadata.rows
+    // Two possible paths for metadataRows (see comment above).
+    const rows: any[] =
+      meta.metadata?.contentMetadataViewModel?.metadataRows ||
+      meta.metadataRows ||
+      [];
+
     let channel = "";
     let views = "";
     let uploaded = "";
-    for (const row of meta.metadataRows || []) {
-      for (const cp of row.metadataParts || []) {
+
+    if (rows.length > 0) {
+      // Row 0 is usually just the channel name.
+      const row0 = rows[0]?.metadataParts || [];
+      if (row0[0]?.text?.content) channel = row0[0].text.content;
+
+      // Row 1 typically has views + uploaded (sometimes only one of them).
+      const row1 = rows[1]?.metadataParts || [];
+      for (const cp of row1) {
         const txt = cp.text?.content;
+        const a11y = cp.accessibilityLabel || "";
         if (!txt) continue;
-        if (!channel && /channel/i.test(cp.text?.commandRuns?.[0]?.onTap?.innertubeCommand?.browseEndpoint?.browseId || "")) {
-          channel = txt;
+        // Detect views — either an explicit accessibility label like
+        // "27 thousand views" or a leading PLAY_ARROW icon.
+        if (!views && (/views/i.test(a11y) || cp.leadingIcon?.name === "PLAY_ARROW_OUTLINED")) {
+          views = txt;
+        } else if (!uploaded && (/ago|streamed|premiered|broadcast/i.test(txt) || /ago|streamed|premiered|broadcast/i.test(a11y))) {
+          uploaded = txt;
         }
-        if (/views/i.test(txt)) views = txt;
-        if (/ago/i.test(txt)) uploaded = txt;
+      }
+      // Fallbacks: scan all rows for views/uploaded if not found yet.
+      if (!views || !uploaded) {
+        for (const row of rows) {
+          for (const cp of row.metadataParts || []) {
+            const txt = cp.text?.content;
+            const a11y = cp.accessibilityLabel || "";
+            if (!txt) continue;
+            if (!views && /views/i.test(a11y)) views = txt;
+            if (!uploaded && /ago|streamed|premiered|broadcast/i.test(a11y)) uploaded = txt;
+          }
+        }
       }
     }
-    // If channel not found in rows, use the first metadata part
-    if (!channel && meta.metadataRows?.[0]?.metadataParts?.[0]?.text?.content) {
-      channel = meta.metadataRows[0].metadataParts[0].text.content;
-    }
-    const channelId = lvm.rendererContext?.commandContext?.onTap?.innertubeCommand?.browseEndpoint?.browseId;
+
+    const channelId =
+      lvm.rendererContext?.commandContext?.onTap?.innertubeCommand?.browseEndpoint?.browseId ||
+      meta.image?.decoratedAvatarViewModel?.rendererContext?.commandContext?.onTap?.innertubeCommand?.browseEndpoint?.browseId;
+
     return {
       videoId: contentId,
       title: title || "",
@@ -283,13 +341,21 @@ function parseVideoRenderer(vr: any, fallbackCategory?: VideoCategory): ScrapedV
  *   - "" → all videos (default)
  *   - "EgIQAQ%3D%3D" → videos only
  *   - "EgIQAg%3D%3D" → channels only
+ *
+ * Pagination: `page` is 1-indexed. YouTube's web search URL accepts a `&page=N`
+ * query param that returns a different slice of results for the same query.
  */
-export async function searchYouTube(query: string, opts: { limit?: number; category?: VideoCategory | "All"; signal?: AbortSignal } = {}): Promise<ScrapedVideo[]> {
+export async function searchYouTube(
+  query: string,
+  opts: { limit?: number; category?: VideoCategory | "All"; signal?: AbortSignal; page?: number } = {},
+): Promise<ScrapedVideo[]> {
   const limit = Math.min(opts.limit ?? 30, 50);
+  const page = Math.max(1, opts.page ?? 1);
   const trimmed = query.trim();
   if (!trimmed) return [];
 
-  const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(trimmed)}`;
+  let url = `https://www.youtube.com/results?search_query=${encodeURIComponent(trimmed)}`;
+  if (page > 1) url += `&page=${page}`;
   const data = await fetchYtInitialData(url);
   if (!data) return [];
 
@@ -419,6 +485,7 @@ export async function fetchVideoMetadata(videoId: string): Promise<ScrapedVideo 
     duration,
     views,
     thumbnail: details.thumbnail?.thumbnails?.slice(-1)[0]?.url,
+    description: details.shortDescription || "",
   };
 }
 
@@ -449,4 +516,309 @@ export async function fetchTrending(limit = 30): Promise<ScrapedVideo[]> {
   }
   // Fallback: search for a broad popular query.
   return searchYouTube("most popular videos 2024", { limit });
+}
+
+/**
+ * Fetch related videos for a given video by scraping its watch page.
+ * YouTube's watch page embeds `ytInitialData` which contains a list of
+ * `compactVideoRenderer` items in the "Related" sidebar. These are the
+ * videos YouTube itself recommends — much better than guessing via search.
+ *
+ * Returns up to `limit` related videos.
+ */
+export async function fetchRelatedVideos(
+  videoId: string,
+  limit = 20,
+): Promise<ScrapedVideo[]> {
+  if (!videoId) return [];
+  const url = `https://www.youtube.com/watch?v=${videoId}`;
+  const data = await fetchYtInitialData(url);
+  if (!data) return [];
+
+  const renderers = findVideoRenderers(data);
+  const seen = new Set<string>([videoId]);
+  const out: ScrapedVideo[] = [];
+  for (const vr of renderers) {
+    const v = parseVideoRenderer(vr);
+    if (!v || seen.has(v.id)) continue;
+    seen.add(v.id);
+    out.push(v);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/**
+ * Fetch the next page of related videos using YouTube's InnerTube API.
+ * Takes a continuation token from a previous related-videos call and returns
+ * more related videos plus (optionally) another continuation token.
+ */
+export async function fetchRelatedVideosContinuation(
+  continuationToken: string,
+  limit = 20,
+): Promise<{ videos: ScrapedVideo[]; nextToken?: string }> {
+  if (!continuationToken) return { videos: [], nextToken: undefined };
+  const response = await callInnertube("next", {
+    continuation: continuationToken,
+    context: INNERTUBE_CONTEXT,
+  });
+  if (!response) return { videos: [], nextToken: undefined };
+
+  // Walk the response for any video renderers.
+  const renderers = findVideoRenderers(response);
+  const out: ScrapedVideo[] = [];
+  const seen = new Set<string>();
+  for (const vr of renderers) {
+    const v = parseVideoRenderer(vr);
+    if (!v || seen.has(v.id)) continue;
+    seen.add(v.id);
+    out.push(v);
+    if (out.length >= limit) break;
+  }
+  // Look for another continuation token.
+  const nextToken = findContinuationToken(response);
+  return { videos: out, nextToken };
+}
+
+/**
+ * Find the first continuationItemRenderer's token in a JSON tree.
+ * Used for both comments and related-videos pagination.
+ */
+function findContinuationToken(obj: any): string | undefined {
+  if (!obj || typeof obj !== "object") return undefined;
+  if (Array.isArray(obj)) {
+    for (const v of obj) {
+      const t = findContinuationToken(v);
+      if (t) return t;
+    }
+    return undefined;
+  }
+  // Direct hit
+  const cir = obj.continuationItemRenderer;
+  if (cir) {
+    const token =
+      cir.continuationEndpoint?.continuationCommand?.token ||
+      cir.button?.buttonRenderer?.command?.continuationCommand?.token ||
+      cir.continuationCommand?.token;
+    if (token) return token;
+  }
+  // Recurse
+  for (const v of Object.values(obj)) {
+    const t = findContinuationToken(v);
+    if (t) return t;
+  }
+  return undefined;
+}
+
+/** InnerTube API context (the same payload YouTube's web client sends). */
+const INNERTUBE_CONTEXT = {
+  client: {
+    clientName: "WEB",
+    clientVersion: "2.20240101.00.00",
+    hl: "en",
+    gl: "US",
+  },
+};
+
+/** InnerTube API key (public, embedded in YouTube's web client JS). */
+const INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
+
+/** Call a YouTube InnerTube endpoint. Returns parsed JSON or null. */
+async function callInnertube(
+  endpoint: "next" | "search",
+  body: Record<string, unknown>,
+): Promise<any | null> {
+  try {
+    const res = await fetch(
+      `https://www.youtube.com/youtubei/v1/${endpoint}?key=${INNERTUBE_KEY}`,
+      {
+        method: "POST",
+        headers: {
+          ...BROWSER_HEADERS,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        next: { revalidate: 300 },
+      },
+    );
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch top-level comments for a YouTube video.
+ *
+ * Strategy:
+ *  1. Scrape the watch page to find the comments-section continuation token
+ *     embedded in `ytInitialData`.
+ *  2. Call the InnerTube `/next` endpoint with that token to get the actual
+ *     comments (YouTube loads comments lazily via this API).
+ *
+ * Returns up to ~20 comments plus an optional `nextPageToken` for pagination.
+ */
+export async function fetchVideoComments(
+  videoId: string,
+  opts: { limit?: number; continuationToken?: string } = {},
+): Promise<CommentsResult> {
+  const limit = Math.min(opts.limit ?? 20, 50);
+
+  // If a continuation token was supplied, fetch the next page directly.
+  let token = opts.continuationToken;
+  if (!token) {
+    // Otherwise, scrape the watch page to find the comments-section token.
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const data = await fetchYtInitialData(url);
+    if (!data) return { comments: [] };
+    token = findCommentsToken(data);
+    if (!token) return { comments: [] };
+  }
+
+  const response = await callInnertube("next", {
+    continuation: token,
+    context: INNERTUBE_CONTEXT,
+  });
+  if (!response) return { comments: [] };
+
+  const comments = parseComments(response, limit);
+  const nextPageToken = findContinuationToken(response);
+  return { comments, nextPageToken };
+}
+
+/** Find the comments-section continuation token in ytInitialData. */
+function findCommentsToken(obj: any): string | undefined {
+  if (!obj || typeof obj !== "object") return undefined;
+
+  // Look for itemSectionRenderer with sectionIdentifier "comment-item-section"
+  // — that's where YouTube puts the comments continuation token.
+  if (Array.isArray(obj)) {
+    for (const v of obj) {
+      const t = findCommentsToken(v);
+      if (t) return t;
+    }
+    return undefined;
+  }
+  if (obj.itemSectionRenderer?.sectionIdentifier === "comment-item-section") {
+    const token = findContinuationToken(obj.itemSectionRenderer);
+    if (token) return token;
+  }
+  for (const v of Object.values(obj)) {
+    const t = findCommentsToken(v);
+    if (t) return t;
+  }
+  return undefined;
+}
+
+/** Parse comments out of an InnerTube response.
+ *
+ * Modern YouTube (2024+) uses an entity-batch pattern: the actual comment
+ * data lives in `frameworkUpdates.entityBatchUpdate.mutations[].payload
+ * .commentEntityPayload`, while the `commentThreadRenderer` items only hold
+ * a `commentKey` that references the entity payload by its `key`.
+ *
+ * We collect all `commentEntityPayload` objects (each one has commentId,
+ * content, author, likes, etc.) — preserving their array order, which
+ * matches display order.
+ */
+function parseComments(response: any, limit: number): ScrapedComment[] {
+  const out: ScrapedComment[] = [];
+  const seen = new Set<string>();
+
+  // 1. Try the modern entity-batch format first.
+  const mutations =
+    response?.frameworkUpdates?.entityBatchUpdate?.mutations ?? [];
+  for (const m of mutations) {
+    const cep = m?.payload?.commentEntityPayload;
+    if (!cep) continue;
+    const c = parseCommentEntity(cep);
+    if (c && !seen.has(c.id)) {
+      seen.add(c.id);
+      out.push(c);
+    }
+    if (out.length >= limit) break;
+  }
+  if (out.length > 0) return out;
+
+  // 2. Fall back to legacy commentThreadRenderer walk (older YouTube layout).
+  function walk(obj: any) {
+    if (!obj || typeof obj !== "object") return;
+    if (Array.isArray(obj)) {
+      for (const v of obj) walk(v);
+      return;
+    }
+    if (obj.commentThreadRenderer) {
+      const c = parseOneComment(obj.commentThreadRenderer);
+      if (c && !seen.has(c.id)) {
+        seen.add(c.id);
+        out.push(c);
+      }
+      return;
+    }
+    for (const v of Object.values(obj)) walk(v);
+  }
+  walk(response);
+  return out.slice(0, limit);
+}
+
+/** Parse a `commentEntityPayload` (modern YouTube format). */
+function parseCommentEntity(cep: any): ScrapedComment | null {
+  try {
+    const id = cep.properties?.commentId;
+    if (!id) return null;
+    // content can be { content: "..." } or { runs: [...] } — handle both.
+    const contentField = cep.properties?.content;
+    let text = "";
+    if (typeof contentField === "string") text = contentField;
+    else if (contentField?.content) text = contentField.content;
+    else if (contentField?.runs) {
+      text = contentField.runs.map((r: any) => r?.text || "").join("");
+    }
+    const author = cep.author?.displayName || "Anonymous";
+    const avatar = cep.author?.avatarThumbnailUrl;
+    const likes = cep.toolbar?.likeCountNotliked || undefined;
+    const published = cep.properties?.publishedTime || undefined;
+    const replies = cep.toolbar?.replyCount
+      ? parseInt(cep.toolbar.replyCount, 10)
+      : undefined;
+    return { id, author, text, likes, published, avatar, replies };
+  } catch {
+    return null;
+  }
+}
+
+function parseOneComment(ctr: any): ScrapedComment | null {
+  try {
+    const c = ctr.comment?.commentRenderer || ctr.comment;
+    if (!c) return null;
+    const id = c.commentId;
+    if (!id) return null;
+    const author = getText(c.authorText) || "Anonymous";
+    const text = getText(c.contentText) || "";
+    const likes = getText(c.voteCount) || undefined;
+    const published = getText(c.publishedTimeText) || undefined;
+    const avatar = c.authorThumbnail?.thumbnails?.slice(-1)[0]?.url;
+    const replies = ctr.comment?.commentRenderer?.replyCount
+      ? ctr.comment.commentRenderer.replyCount
+      : undefined;
+    return { id, author, text, likes, published, avatar, replies };
+  } catch {
+    return null;
+  }
+}
+
+function parseOneCommentEntity(cep: any): ScrapedComment | null {
+  try {
+    const id = cep.properties?.commentId;
+    if (!id) return null;
+    const author = getText(cep.author?.name) || "Anonymous";
+    const text = getText(cep.properties?.content) || "";
+    const likes = getText(cep.toolbar?.likeCountNotliked) || undefined;
+    const published = getText(cep.properties?.publishedTime) || undefined;
+    const avatar = cep.author?.avatar?.thumbnails?.slice(-1)[0]?.url;
+    return { id, author, text, likes, published, avatar };
+  } catch {
+    return null;
+  }
 }

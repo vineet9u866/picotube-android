@@ -1,10 +1,13 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { VideoGrid } from "./video-grid";
 import { CategoryChips } from "./category-chips";
 import { useAppStore } from "@/store/app-store";
-import { SearchX } from "lucide-react";
+import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
+import { SearchX, Loader2 } from "lucide-react";
+import { Fragment } from "react";
+import type { VideoMeta } from "@/store/app-store";
 
 interface ApiVideo {
   id: string;
@@ -14,25 +17,62 @@ interface ApiVideo {
   duration?: string;
   views?: string;
   uploaded?: string;
+  thumbnail?: string;
 }
+
+interface SearchResponse {
+  videos: ApiVideo[];
+  source: string;
+  query?: string;
+  category?: string;
+  page: number;
+  error?: string;
+}
+
+const PAGE_SIZE = 24;
 
 export function SearchView({ query }: { query: string }) {
   const activeCategory = useAppStore((s) => s.activeCategory);
 
-  const { data, isLoading, isError, refetch } = useQuery<{ videos: ApiVideo[] }>({
+  const {
+    data,
+    isLoading,
+    isError,
+    refetch,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<SearchResponse>({
     queryKey: ["search", query, activeCategory],
-    queryFn: async () => {
+    queryFn: async ({ pageParam }) => {
+      const page = pageParam as number;
       const params = new URLSearchParams({
         q: query,
         category: activeCategory,
-        limit: "30",
+        limit: String(PAGE_SIZE),
+        page: String(page),
       });
       const res = await fetch(`/api/search?${params.toString()}`);
       if (!res.ok) throw new Error("Search failed");
       return res.json();
     },
     enabled: query.trim().length > 0,
+    initialPageParam: 1,
+    getNextPageParam: (last) =>
+      last.videos.length > 0 ? (last.page || 1) + 1 : undefined,
     staleTime: 60_000,
+  });
+
+  const allVideos: ApiVideo[] = data?.pages?.flatMap((p) => p.videos) ?? [];
+  const firstPage = data?.pages?.[0];
+  const source = firstPage?.source;
+  const totalShown = allVideos.length;
+
+  const sentinelRef = useInfiniteScroll<HTMLDivElement>({
+    onLoadMore: () => fetchNextPage(),
+    hasMore: !!hasNextPage,
+    isLoading: isFetchingNextPage,
+    enabled: !isLoading && query.trim().length > 0,
   });
 
   return (
@@ -44,18 +84,21 @@ export function SearchView({ query }: { query: string }) {
             Search results for
           </h2>
           <span className="text-sm font-bold text-foreground">{query}</span>
-          {data?.videos && (
+          {totalShown > 0 && (
             <span className="text-[11px] text-muted-foreground">
-              &middot; {data.videos.length} {data.videos.length === 1 ? "result" : "results"}
+              &middot; {totalShown}+ {totalShown === 1 ? "result" : "results"}
             </span>
           )}
         </div>
 
         {isError ? (
           <div className="py-16 text-center text-sm text-muted-foreground">
-            Search failed. <button onClick={() => refetch()} className="underline">Retry</button>
+            Search failed.{" "}
+            <button onClick={() => refetch()} className="underline">
+              Retry
+            </button>
           </div>
-        ) : !isLoading && (data?.videos?.length ?? 0) === 0 ? (
+        ) : !isLoading && totalShown === 0 ? (
           <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
             <SearchX className="h-8 w-8 text-muted-foreground" />
             <p className="text-sm text-muted-foreground">
@@ -68,19 +111,49 @@ export function SearchView({ query }: { query: string }) {
           </div>
         ) : (
           <>
-            {data?.source === "youtube-search" && (
+            {source === "youtube-search" && (
               <p className="mb-2 inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
                 Full YouTube search results
               </p>
             )}
-            {data?.source === "rss-fallback" && (
+            {source === "rss-fallback" && (
               <p className="mb-2 inline-flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
                 Showing RSS results (full YouTube search unavailable)
               </p>
             )}
-            <VideoGrid videos={data?.videos || []} loading={isLoading} skeletonCount={14} />
+
+            {isLoading ? (
+              <VideoGrid videos={[]} loading skeletonCount={14} />
+            ) : (
+              <>
+                {data?.pages?.map((page, i) => (
+                  <Fragment key={i}>
+                    {i > 0 && page.videos.length > 0 && (
+                      <div className="my-3 border-t border-border/60" />
+                    )}
+                    <VideoGrid videos={page.videos as unknown as VideoMeta[]} />
+                  </Fragment>
+                ))}
+
+                {/* Infinite scroll sentinel */}
+                <div ref={sentinelRef} className="h-12 w-full" aria-hidden />
+
+                {isFetchingNextPage && (
+                  <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Loading more results…
+                  </div>
+                )}
+
+                {!hasNextPage && totalShown > 0 && (
+                  <div className="py-4 text-center text-[10px] text-muted-foreground/60">
+                    End of results
+                  </div>
+                )}
+              </>
+            )}
           </>
         )}
       </div>

@@ -9,10 +9,12 @@ export const revalidate = 3600;
 /**
  * GET /api/video/<id>
  *
- * Resolves ANY YouTube video ID to its metadata. Lookup order:
- *   1. Curated catalog (instant)
- *   2. Live RSS cache (videos surfaced on home/search)
- *   3. YouTube watch page scrape (full YouTube access — works for any video)
+ * Resolves ANY YouTube video ID to its metadata (including full description).
+ * Lookup order:
+ *   1. YouTube watch page scrape (full YouTube access — works for any video,
+ *      returns title/channel/duration/views/description/thumbnail)
+ *   2. Live RSS cache (videos surfaced on home/search — no description)
+ *   3. Curated catalog (no description)
  *
  * This means the user can paste any YouTube video ID into the URL and the
  * watch page will load it: #/watch?v=<anyYouTubeVideoId>
@@ -23,28 +25,28 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: "Invalid video id" }, { status: 400 });
   }
 
-  // 1. Catalog (instant).
+  // 1. YouTube watch page scrape — gives full metadata incl. description.
+  try {
+    const v = await fetchVideoMetadata(id);
+    if (v && v.title !== "YouTube video") {
+      return NextResponse.json({ video: v, source: "youtube-scrape" });
+    }
+  } catch {
+    // ignore — fall back
+  }
+
+  // 2. Catalog (instant, no description).
   const cached = findCatalogVideo(id);
   if (cached) {
     return NextResponse.json({ video: cached, source: "catalog" });
   }
 
-  // 2. Live RSS cache.
+  // 3. Live RSS cache.
   try {
     const all = await fetchAllFeeds({ category: "All", limit: undefined });
     const hit = all.find((v) => v.id === id);
     if (hit) {
       return NextResponse.json({ video: hit, source: "rss-live" });
-    }
-  } catch {
-    // ignore
-  }
-
-  // 3. YouTube watch page scrape — works for ANY public YouTube video.
-  try {
-    const v = await fetchVideoMetadata(id);
-    if (v) {
-      return NextResponse.json({ video: v, source: "youtube-scrape" });
     }
   } catch {
     // ignore

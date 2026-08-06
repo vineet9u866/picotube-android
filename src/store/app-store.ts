@@ -24,6 +24,7 @@ export interface VideoMeta {
   views?: string;
   uploaded?: string;
   thumbnail?: string;
+  description?: string;
 }
 
 export type View =
