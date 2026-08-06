@@ -4,15 +4,27 @@ import { cn } from "@/lib/utils";
 import { VideoCard } from "./video-card";
 import type { CatalogVideo } from "@/lib/youtube-catalog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useAppStore, type VideoMeta } from "@/store/app-store";
+import { useEffect } from "react";
 
 interface VideoGridProps {
-  videos: CatalogVideo[];
+  videos: (CatalogVideo | VideoMeta)[];
   loading?: boolean;
   className?: string;
   skeletonCount?: number;
 }
 
 export function VideoGrid({ videos, loading, className, skeletonCount = 12 }: VideoGridProps) {
+  const cacheVideos = useAppStore((s) => s.cacheVideos);
+
+  // Cache every video we render so the watch view can read metadata
+  // instantly without an extra API call.
+  useEffect(() => {
+    if (videos.length > 0) {
+      cacheVideos(videos as VideoMeta[]);
+    }
+  }, [videos, cacheVideos]);
+
   return (
     <div
       className={cn(

@@ -62,16 +62,22 @@ export function SearchView({ query }: { query: string }) {
               No results for <span className="font-semibold">{query}</span>
             </p>
             <p className="text-xs text-muted-foreground">
-              PicoTube searches across 35+ YouTube channels via RSS. Try a
-              broader keyword or different category.
+              PicoTube searches ALL of YouTube via server-side scraping. Try
+              any keyword — videos, music, tutorials, anything.
             </p>
           </div>
         ) : (
           <>
-            {data?.source === "rss-live" && (
+            {data?.source === "youtube-search" && (
               <p className="mb-2 inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                Live results from YouTube RSS feeds
+                Full YouTube search results
+              </p>
+            )}
+            {data?.source === "rss-fallback" && (
+              <p className="mb-2 inline-flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                Showing RSS results (full YouTube search unavailable)
               </p>
             )}
             <VideoGrid videos={data?.videos || []} loading={isLoading} skeletonCount={14} />

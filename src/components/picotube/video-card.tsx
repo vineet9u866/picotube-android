@@ -4,24 +4,30 @@ import { useMemo } from "react";
 import { Play, Radio } from "lucide-react";
 import type { CatalogVideo } from "@/lib/youtube-catalog";
 import { thumbnailUrl } from "@/lib/youtube-catalog";
-import { useAppStore } from "@/store/app-store";
+import { useAppStore, type VideoMeta } from "@/store/app-store";
 import { cn } from "@/lib/utils";
 
 interface VideoCardProps {
-  video: CatalogVideo;
+  video: CatalogVideo | VideoMeta;
   className?: string;
 }
 
 export function VideoCard({ video, className }: VideoCardProps) {
   const goWatch = useAppStore((s) => s.goWatch);
   const isLive = video.duration?.toUpperCase() === "LIVE" || video.category === "Live";
+  const customThumb = (video as VideoMeta).thumbnail;
 
-  const thumbnail = useMemo(() => thumbnailUrl(video.id, "mq"), [video.id]);
+  // Use the video's own thumbnail if available (scraped results include it),
+  // otherwise fall back to YouTube's CDN thumbnail by video ID.
+  const thumbnail = useMemo(() => {
+    if (customThumb) return customThumb;
+    return thumbnailUrl(video.id, "mq");
+  }, [video.id, customThumb]);
 
   return (
     <button
       type="button"
-      onClick={() => goWatch(video.id)}
+      onClick={() => goWatch(video.id, video as VideoMeta)}
       className={cn(
         "group flex flex-col text-left",
         "focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 rounded-md",
@@ -38,7 +44,7 @@ export function VideoCard({ video, className }: VideoCardProps) {
             "group-hover:scale-[1.04] group-hover:brightness-95",
           )}
           onError={(e) => {
-            // Fallback to hqdefault if mq fails (rare)
+            // Fallback to hqdefault if mq/custom fails
             const target = e.currentTarget;
             if (!target.dataset.fallback) {
               target.dataset.fallback = "1";
@@ -71,7 +77,7 @@ export function VideoCard({ video, className }: VideoCardProps) {
 
       <div className="mt-1.5 flex gap-1.5">
         <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-rose-700 text-[9px] font-bold text-white">
-          {video.channel.slice(0, 1).toUpperCase()}
+          {(video.channel || "?").slice(0, 1).toUpperCase()}
         </div>
         <div className="min-w-0 flex-1">
           <h3 className="line-clamp-2 text-xs font-medium leading-snug group-hover:text-rose-600 dark:group-hover:text-rose-400 transition-colors">
@@ -90,3 +96,4 @@ export function VideoCard({ video, className }: VideoCardProps) {
     </button>
   );
 }
+

@@ -48,8 +48,14 @@ export function HomeView() {
           <>
             <div className="mb-2 flex items-center justify-between">
               <h2 className="text-xs font-semibold text-muted-foreground">
-                {activeCategory === "All" ? "Latest from YouTube" : activeCategory}
+                {activeCategory === "All" ? "YouTube Trending" : activeCategory}
               </h2>
+              {(data?.source === "youtube-trending" || data?.source === "youtube-search") && (
+                <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Full YouTube access
+                </span>
+              )}
               {data?.source === "rss-live" && (
                 <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -58,7 +64,7 @@ export function HomeView() {
               )}
               {data?.source === "catalog-fallback" && (
                 <span className="text-[10px] text-amber-600 dark:text-amber-400">
-                  Showing catalog &middot; YouTube RSS unreachable
+                  Showing catalog &middot; YouTube unreachable
                 </span>
               )}
             </div>
