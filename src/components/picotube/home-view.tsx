@@ -48,10 +48,18 @@ export function HomeView() {
           <>
             <div className="mb-2 flex items-center justify-between">
               <h2 className="text-xs font-semibold text-muted-foreground">
-                {activeCategory === "All" ? "Trending now" : activeCategory}
+                {activeCategory === "All" ? "Latest from YouTube" : activeCategory}
               </h2>
-              {data?.source === "catalog" && (
-                <span className="text-[10px] text-muted-foreground">Curated catalog &middot; add YOUTUBE_API_KEY for live results</span>
+              {data?.source === "rss-live" && (
+                <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Live from YouTube RSS
+                </span>
+              )}
+              {data?.source === "catalog-fallback" && (
+                <span className="text-[10px] text-amber-600 dark:text-amber-400">
+                  Showing catalog &middot; YouTube RSS unreachable
+                </span>
               )}
             </div>
             <VideoGrid videos={data?.videos || []} loading={isLoading} skeletonCount={14} />

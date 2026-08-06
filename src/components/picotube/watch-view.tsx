@@ -143,9 +143,10 @@ export function WatchView({ videoId }: { videoId: string }) {
           </div>
 
           <div className="mt-3 rounded-md bg-accent/50 p-2.5 text-[11px] leading-relaxed text-muted-foreground">
-            Streaming via YouTube embed (youtube-nocookie). PicoTube does not store or proxy
-            video content — playback happens directly from YouTube's servers. No account
-            required, no ads.
+            Streaming via YouTube embed (youtube-nocookie). PicoTube fetches
+            fresh content directly from YouTube&apos;s public RSS feeds — no API
+            key, no accounts, no ads. Playback happens directly from YouTube&apos;s
+            servers.
           </div>
         </div>
 

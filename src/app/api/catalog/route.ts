@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import { getPopularByCategory, hasApiKey } from "@/lib/youtube-api";
+import { fetchAllFeeds } from "@/lib/youtube-rss";
 import { filterCatalog } from "@/lib/youtube-catalog";
 import type { VideoCategory } from "@/lib/youtube-catalog";
 
 export const dynamic = "force-dynamic";
-export const revalidate = 300;
+export const revalidate = 600;
 
 const VALID: (VideoCategory | "All")[] = [
   "All", "Music", "Tech", "Gaming", "Science", "Education", "Comedy",
@@ -14,32 +14,45 @@ const VALID: (VideoCategory | "All")[] = [
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const cat = (url.searchParams.get("category") || "All") as VideoCategory | "All";
-  const limit = Math.min(parseInt(url.searchParams.get("limit") || "24", 10) || 24, 50);
+  const limit = Math.min(parseInt(url.searchParams.get("limit") || "30", 10) || 30, 60);
 
   if (!VALID.includes(cat)) {
     return NextResponse.json({ error: "Invalid category" }, { status: 400 });
   }
 
   try {
-    // Always include catalog results first so UI is never empty even if the API is rate-limited.
-    const catalog = filterCatalog({ category: cat, limit });
-    let apiResults: typeof catalog = [];
-    if (hasApiKey()) {
-      try {
-        apiResults = await getPopularByCategory(cat, limit) as typeof catalog;
-      } catch {
-        apiResults = [];
-      }
+    // Primary: live YouTube RSS feeds (no API key needed).
+    const live = await fetchAllFeeds({ category: cat, limit });
+
+    // Emergency fallback: if RSS returns nothing, use the curated catalog.
+    if (live.length === 0) {
+      const catalog = filterCatalog({ category: cat, limit });
+      return NextResponse.json({
+        videos: catalog,
+        source: "catalog-fallback",
+        category: cat,
+      });
     }
-    // Merge: prefer catalog items, append unique API items.
-    const seen = new Set(catalog.map((v) => v.id));
-    const merged = [...catalog, ...apiResults.filter((v) => !seen.has(v.id))].slice(0, limit);
+
+    // Merge: prepend a couple of catalog items so the UI is never empty
+    // even if YouTube is slow, then append unique RSS items.
+    const catalogTop = filterCatalog({ category: cat, limit: 4 });
+    const seen = new Set(catalogTop.map((v) => v.id));
+    const merged = [...catalogTop, ...live.filter((v) => !seen.has(v.id))].slice(0, limit);
+
     return NextResponse.json({
       videos: merged,
-      source: hasApiKey() ? "hybrid" : "catalog",
+      source: "rss-live",
       category: cat,
     });
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Internal error" }, { status: 500 });
+    // Last-resort: catalog.
+    const catalog = filterCatalog({ category: cat, limit });
+    return NextResponse.json({
+      videos: catalog,
+      source: "catalog-fallback",
+      category: cat,
+      error: e?.message,
+    });
   }
 }
