@@ -78,8 +78,6 @@ jobs:
           org.gradle.caching=true
           android.useAndroidX=true
           android.enableJetifier=true
-          # Enable Gradle configuration cache for faster subsequent builds.
-          org.gradle.configuration-cache=true
           EOF
 
       - name: Install dependencies
