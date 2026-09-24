@@ -13,8 +13,12 @@ this approach keeps the repo small and the patches version-controlled.
 | `AndroidManifest.xml` | `android/app/src/main/AndroidManifest.xml` | Permissions, exported MainActivity (Android 12+ requirement), PIP attributes, scoped storage (Android 13+). |
 | `strings.xml` | `android/app/src/main/res/values/strings.xml` | App name = "PicoTube". |
 | `variables.gradle` | `android/variables.gradle` | `compileSdk=35`, `targetSdk=34` (Android 14 ready, Android 15 ready when bumped). |
-| `build.gradle` | `android/build.gradle` (project-level) | AGP 8.5.2 (supports compileSdk 35; compatible with Capacitor 6.1.2's settings.gradle). |
-| `gradle-wrapper.properties` | `android/gradle/wrapper/gradle-wrapper.properties` | Gradle 8.7 (required for AGP 8.5.2). |
+
+We don't patch the project-level `build.gradle` or `gradle-wrapper.properties`
+because Capacitor 6.1.2's defaults (AGP 8.2.1 + Gradle 8.7) work fine with
+`compileSdk=35`. Higher AGP versions (8.5+) broke Capacitor 6.1.2's
+`capacitor.settings.gradle` `include()` call; we'll revisit when Capacitor 6.2
+lands.
 
 ## Why we patch instead of committing `android/`
 
@@ -38,8 +42,8 @@ The app targets Android 14:
 
 ### Android 15 (API 35) — prepared
 
-To opt in to Android 15 when ready, just change ONE line in
-`variables.gradle`:
+We already compile with SDK 35 (`compileSdk=35`). To opt in to Android 15
+**runtime behavior** when ready, change ONE line in `variables.gradle`:
 
 ```diff
 ext {
@@ -62,7 +66,8 @@ for system bars (no deprecation warnings on SDK 35).
 2. **No PIP call in onCreate()** — The previous version called
    `setPictureInPictureParams()` during onCreate, which crashed on
    devices that don't support PIP. We now only set params when we've
-   confirmed PIP is supported.
+   confirmed PIP is supported AND only for Android 14+ (using
+   setAutoEnterEnabled, the system handles it).
 
 3. **No FLAG_LAYOUT_NO_LIMITS** — This flag, on Android 14+, breaks
    WebView touch dispatch (taps under the status/nav bars don't reach

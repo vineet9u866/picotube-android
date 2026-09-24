@@ -124,9 +124,14 @@ jobs:
           #   - Fix Android 14 crashes (PIP feature check, no
           #     FLAG_LAYOUT_NO_LIMITS, no setPictureInPictureParams in onCreate)
           #   - Target Android 14 (targetSdk=34) with Android 15 readiness
-          #     (compileSdk=35, AGP 8.6.0, Gradle 8.9)
+          #     (compileSdk=35)
           #   - Add proper permissions (scoped storage, no MANAGE_EXTERNAL_STORAGE)
           #   - Add android:exported="true" to MainActivity (Android 12+ requirement)
+          #
+          # We DON'T patch build.gradle / gradle-wrapper.properties —
+          # Capacitor 6.1.2's defaults (AGP 8.2.1 + Gradle 8.7) work with
+          # compileSdk=35. Higher AGP versions broke Capacitor's
+          # capacitor.settings.gradle include() call.
           set -e
           mkdir -p android/app/src/main/java/com/picotube/net
           cp android-patches/MainActivity.java \
@@ -137,10 +142,6 @@ jobs:
           cp android-patches/strings.xml \
              android/app/src/main/res/values/strings.xml
           cp android-patches/variables.gradle android/variables.gradle
-          cp android-patches/build.gradle android/build.gradle
-          mkdir -p android/gradle/wrapper
-          cp android-patches/gradle-wrapper.properties \
-             android/gradle/wrapper/gradle-wrapper.properties
           echo "Applied patches:"
           ls -la android-patches/
 
