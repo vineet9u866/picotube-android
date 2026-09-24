@@ -242,7 +242,9 @@ jobs:
       - name: Copy PicoTube logo as Android app icon
         run: |
           # Generate all required Android launcher icon sizes from the
-          # PicoTube logo we put in /public/icon.png at build time.
+          # PicoTube logo in /public/icon.png. We use ImageMagick (install
+          # it first since it's not preinstalled on ubuntu-latest).
+          sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick > /dev/null 2>&1
           mkdir -p /tmp/icons
           convert -background none public/icon.png -resize 48x48   /tmp/icons/mdpi.png
           convert -background none public/icon.png -resize 72x72   /tmp/icons/hdpi.png
@@ -250,20 +252,12 @@ jobs:
           convert -background none public/icon.png -resize 144x144 /tmp/icons/xxhdpi.png
           convert -background none public/icon.png -resize 192x192 /tmp/icons/xxxhdpi.png
 
-          # Round versions for the round launcher icon.
-          for s in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
-            size=$(echo "$s" | sed 's/mdpi/48/; s/hdpi/72/; s/xhdpi/96/; s/xxhdpi/144/; s/xxxhdpi/192/')
-            convert -background none public/icon.png -resize ${size}x${size} \
-              \( +clone -alpha O -channel A -blur 0x${size} -level 0,0 +channel \) \
-              -compose DstIn -composite /tmp/icons/round_${s}.png
-          done
-
           # Replace the default Android launcher icons.
           for s in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
             target="android/app/src/main/res/mipmap-${s}"
             mkdir -p "$target"
             cp /tmp/icons/${s}.png "$target/ic_launcher.png"
-            cp /tmp/icons/round_${s}.png "$target/ic_launcher_round.png"
+            cp /tmp/icons/${s}.png "$target/ic_launcher_round.png"
           done
 
           # Also generate the Play Store / marketing icon (512x512).
