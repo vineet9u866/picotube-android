@@ -13,11 +13,16 @@ const VALID: (VideoCategory | "All")[] = [
 ];
 
 /**
- * GET /api/search?q=<query>&category=<cat>&limit=<n>&page=<n>
+ * GET /api/search?q=<query>&category=<cat>&limit=<n>&page=<n>&except=<comma-sep-ids>
  *
  * Searches ALL of YouTube by scraping the search results page server-side.
- * No API key required — this gives full YouTube access for any query.
+ * No API key required — this gives full YouTube access for any query,
+ * including partial queries (a few letters are enough — YouTube's web
+ * search auto-completes the query server-side).
+ *
  * Pagination via `page` (1-indexed) — YouTube's web search supports `&page=N`.
+ * The `except` param lets the client dedupe across pages so infinite scroll
+ * never repeats a video.
  *
  * Layered fallback strategy:
  *   1. YouTube full search (scraped)            ← primary, full YouTube access
@@ -30,6 +35,10 @@ export async function GET(req: Request) {
   const cat = (url.searchParams.get("category") || "All") as VideoCategory | "All";
   const limit = Math.min(parseInt(url.searchParams.get("limit") || "30", 10) || 30, 60);
   const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+  const exceptParam = url.searchParams.get("except") || "";
+  const except = new Set(
+    exceptParam.split(",").map((s) => s.trim()).filter(Boolean),
+  );
 
   if (!VALID.includes(cat)) {
     return NextResponse.json({ error: "Invalid category" }, { status: 400 });
@@ -37,33 +46,35 @@ export async function GET(req: Request) {
 
   const trimmed = query.trim();
   if (!trimmed) {
-    // Empty query → return RSS latest instead of search results.
     const live = await searchFeeds("", { category: cat, limit }).catch(() => []);
-    return NextResponse.json({ videos: live, source: "rss-live", query: "", category: cat, page });
+    const filtered = live.filter((v: any) => !except.has(v.id));
+    return NextResponse.json({ videos: filtered, source: "rss-live", query: "", category: cat, page });
   }
 
   // 1. Full YouTube search (scraped — access to every video on YouTube).
   let scraped: Awaited<ReturnType<typeof searchYouTube>> = [];
   let scrapeError: string | undefined;
   try {
-    scraped = await searchYouTube(trimmed, { limit, category: cat, page });
+    scraped = await searchYouTube(trimmed, { limit: limit * 2, category: cat, page });
   } catch (e: any) {
     scrapeError = e?.message;
   }
 
-  if (scraped.length > 0) {
+  const filteredScraped = scraped.filter((v) => !except.has(v.id));
+
+  if (filteredScraped.length > 0) {
     return NextResponse.json({
-      videos: scraped,
+      videos: filteredScraped.slice(0, limit),
       source: "youtube-search",
       query: trimmed,
       category: cat,
       page,
       error: scrapeError,
+      hasMore: scraped.length >= limit,
     });
   }
 
-  // Page > 1 with no results = end of results. Don't fall back to RSS/catalog
-  // because that would mix paginated search results with non-search results.
+  // Page > 1 with no results = end of results.
   if (page > 1) {
     return NextResponse.json({
       videos: [],
@@ -72,16 +83,22 @@ export async function GET(req: Request) {
       category: cat,
       page,
       error: scrapeError,
+      hasMore: false,
     });
   }
 
-  // 2. RSS feed search (limited to our 34 channels but always works).
+  // 2. RSS feed search.
   const rss = await searchFeeds(trimmed, { category: cat, limit }).catch(() => []);
+  const filteredRss = rss.filter((v: any) => !except.has(v.id));
 
   // 3. Catalog fallback.
   const catalog = filterCatalog({ query: trimmed, category: cat, limit });
+  const filteredCatalog = catalog.filter((v) => !except.has(v.id));
 
-  const merged = [...rss, ...catalog.filter((v) => !rss.some((r) => r.id === v.id))].slice(0, limit);
+  const merged = [
+    ...filteredRss,
+    ...filteredCatalog.filter((v) => !filteredRss.some((r) => r.id === v.id)),
+  ].slice(0, limit);
 
   if (merged.length === 0) {
     return NextResponse.json({
@@ -96,7 +113,7 @@ export async function GET(req: Request) {
 
   return NextResponse.json({
     videos: merged,
-    source: rss.length > 0 ? "rss-fallback" : "catalog-fallback",
+    source: filteredRss.length > 0 ? "rss-fallback" : "catalog-fallback",
     query: trimmed,
     category: cat,
     error: scrapeError,

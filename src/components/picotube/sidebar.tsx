@@ -3,9 +3,10 @@
 import {
   Home, Music, Cpu, Gamepad2, FlaskRound, GraduationCap, Laugh,
   Plane, UtensilsCrossed, Trophy, Clapperboard, Radio, Newspaper,
-  X, Play, Github,
+  X, Play, Github, Bookmark, ThumbsUp, History, ListVideo, Zap,
 } from "lucide-react";
 import { useAppStore } from "@/store/app-store";
+import { useLibraryStore } from "@/store/library-store";
 import { CATEGORIES, type VideoCategory } from "@/lib/youtube-catalog";
 import { cn } from "@/lib/utils";
 import { useEffect } from "react";
@@ -26,7 +27,24 @@ const ICONS: Record<VideoCategory, typeof Home> = {
 };
 
 export function Sidebar() {
-  const { sidebarOpen, setSidebar, activeCategory, setActiveCategory, goHome, view, goSearch, setView } = useAppStore();
+  const {
+    sidebarOpen,
+    setSidebar,
+    activeCategory,
+    setActiveCategory,
+    goHome,
+    view,
+    goSearch,
+    setView,
+    goShorts,
+    goLibrary,
+    goPlaylist,
+  } = useAppStore();
+
+  const playlists = useLibraryStore((s) => s.playlists);
+  const savedCount = useLibraryStore((s) => s.saved.length);
+  const likedCount = useLibraryStore((s) => s.liked.length);
+  const historyCount = useLibraryStore((s) => s.history.length);
 
   // Close sidebar on view change (mobile UX)
   useEffect(() => {
@@ -38,7 +56,6 @@ export function Sidebar() {
     if (view.kind === "search") {
       goSearch(view.query || "");
     } else {
-      // Preserve the new category — do not call goHome (it resets category).
       setView({ kind: "home" });
     }
   }
@@ -86,6 +103,132 @@ export function Sidebar() {
             <Home className="h-3.5 w-3.5" />
             Home
           </button>
+
+          <button
+            type="button"
+            onClick={goShorts}
+            className={cn(
+              "mb-1 flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs",
+              "hover:bg-accent transition-colors",
+              view.kind === "shorts" && "bg-accent font-medium text-rose-600 dark:text-rose-400",
+            )}
+          >
+            <Zap className="h-3.5 w-3.5" />
+            Shorts
+          </button>
+
+          {/* Library section */}
+          <div className="my-2 h-px bg-border" />
+          <div className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            Library
+          </div>
+
+          <button
+            type="button"
+            onClick={() => goLibrary("playlists")}
+            className={cn(
+              "mb-0.5 flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs",
+              "hover:bg-accent transition-colors",
+              view.kind === "library" && view.section === "playlists" &&
+                "bg-accent font-medium text-rose-600 dark:text-rose-400",
+            )}
+          >
+            <ListVideo className="h-3.5 w-3.5" />
+            Playlists
+            {playlists.length > 0 && (
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {playlists.length}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => goLibrary("saved")}
+            className={cn(
+              "mb-0.5 flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs",
+              "hover:bg-accent transition-colors",
+              view.kind === "library" && view.section === "saved" &&
+                "bg-accent font-medium text-rose-600 dark:text-rose-400",
+            )}
+          >
+            <Bookmark className="h-3.5 w-3.5" />
+            Saved
+            {savedCount > 0 && (
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {savedCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => goLibrary("liked")}
+            className={cn(
+              "mb-0.5 flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs",
+              "hover:bg-accent transition-colors",
+              view.kind === "library" && view.section === "liked" &&
+                "bg-accent font-medium text-rose-600 dark:text-rose-400",
+            )}
+          >
+            <ThumbsUp className="h-3.5 w-3.5" />
+            Liked
+            {likedCount > 0 && (
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {likedCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => goLibrary("history")}
+            className={cn(
+              "mb-0.5 flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs",
+              "hover:bg-accent transition-colors",
+              view.kind === "library" && view.section === "history" &&
+                "bg-accent font-medium text-rose-600 dark:text-rose-400",
+            )}
+          >
+            <History className="h-3.5 w-3.5" />
+            History
+            {historyCount > 0 && (
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {historyCount}
+              </span>
+            )}
+          </button>
+
+          {/* User playlists list (quick access) */}
+          {playlists.length > 0 && (
+            <>
+              <div className="mt-2 mb-1 h-px bg-border" />
+              <div className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                My playlists
+              </div>
+              <div className="max-h-48 overflow-y-auto">
+                {playlists.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => goPlaylist(p.id)}
+                    className={cn(
+                      "mb-0.5 flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs",
+                      "hover:bg-accent transition-colors",
+                      view.kind === "playlist" && view.playlistId === p.id &&
+                        "bg-accent font-medium",
+                    )}
+                  >
+                    <ListVideo className="h-3 w-3 shrink-0 text-muted-foreground" />
+                    <span className="truncate">{p.name}</span>
+                    <span className="ml-auto text-[10px] text-muted-foreground">
+                      {p.videos.length}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
 
           <div className="my-2 h-px bg-border" />
 

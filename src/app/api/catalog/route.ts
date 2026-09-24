@@ -13,16 +13,18 @@ const VALID: (VideoCategory | "All")[] = [
 ];
 
 /**
- * GET /api/catalog?category=<cat>&limit=<n>&page=<n>
+ * GET /api/catalog?category=<cat>&limit=<n>&page=<n>&except=<comma-sep-ids>
  *
- * Paginated feed:
+ * Paginated feed with deduplication so infinite scroll never repeats a
+ * video across pages:
  *   - Page 1, category=All  → YouTube trending (full YouTube access)
  *   - Page 2+, category=All → RSS latest across all 35 channels, sliced
  *   - Any page, specific cat → RSS feeds for that category, sliced
  *
- * RSS feeds return ~15 videos per channel × 35 channels = ~500 videos,
- * giving us roughly 17 pages of content at 30 per page. When the pool
- * is exhausted, returns an empty array (signals "no more pages" to client).
+ * The `except` query param lets the client pass a comma-separated list of
+ * video IDs already loaded. The server filters those out before slicing
+ * the next page, so even if YouTube returns the same video on a later
+ * page (very common with `&page=N`), the client never sees a duplicate.
  */
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -30,6 +32,10 @@ export async function GET(req: Request) {
   const limit = Math.min(parseInt(url.searchParams.get("limit") || "30", 10) || 30, 60);
   const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
   const offset = (page - 1) * limit;
+  const exceptParam = url.searchParams.get("except") || "";
+  const except = new Set(
+    exceptParam.split(",").map((s) => s.trim()).filter(Boolean),
+  );
 
   if (!VALID.includes(cat)) {
     return NextResponse.json({ error: "Invalid category" }, { status: 400 });
@@ -39,10 +45,11 @@ export async function GET(req: Request) {
     if (cat === "All" && page === 1) {
       // 1. Try YouTube trending first (full YouTube access).
       try {
-        const trending = await fetchTrending(limit);
-        if (trending.length > 0) {
+        const trending = await fetchTrending(limit * 2); // grab extra to allow dedupe
+        const filtered = trending.filter((v) => !except.has(v.id));
+        if (filtered.length > 0) {
           return NextResponse.json({
-            videos: trending,
+            videos: filtered.slice(0, limit),
             source: "youtube-trending",
             category: cat,
             page,
@@ -55,11 +62,8 @@ export async function GET(req: Request) {
     }
 
     // 2. RSS pool, paginated by offset.
-    // For page 1 of a specific category, also include a few catalog items
-    // at the top for instant paint.
     const live = await fetchAllFeeds({ category: cat, limit: undefined });
     if (live.length === 0 && cat === "All") {
-      // Last resort: catalog (page 1 only).
       if (page === 1) {
         const catalog = filterCatalog({ category: cat, limit });
         return NextResponse.json({
@@ -88,14 +92,16 @@ export async function GET(req: Request) {
       pool = [...catalogTop, ...live.filter((v) => !seen.has(v.id))];
     }
 
-    const slice = pool.slice(offset, offset + limit);
-    const hasMore = offset + limit < pool.length;
+    // Filter out already-seen video IDs across pages.
+    const filteredPool = pool.filter((v) => !except.has(v.id));
+    const slice = filteredPool.slice(offset, offset + limit);
+    const hasMore = offset + limit < filteredPool.length;
 
     if (slice.length === 0 && cat !== "All" && page === 1) {
-      // Specific category exhausted from RSS — fall back to catalog.
       const catalog = filterCatalog({ category: cat, limit });
+      const filtered = catalog.filter((v) => !except.has(v.id));
       return NextResponse.json({
-        videos: catalog,
+        videos: filtered,
         source: "catalog-fallback",
         category: cat,
         page,
@@ -113,8 +119,9 @@ export async function GET(req: Request) {
   } catch (e: any) {
     if (page === 1) {
       const catalog = filterCatalog({ category: cat, limit });
+      const filtered = catalog.filter((v) => !except.has(v.id));
       return NextResponse.json({
-        videos: catalog,
+        videos: filtered,
         source: "catalog-fallback",
         category: cat,
         error: e?.message,

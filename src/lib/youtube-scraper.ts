@@ -28,23 +28,14 @@ export interface ScrapedVideo {
   views?: string;
   uploaded?: string;
   thumbnail?: string;
-  description?: string;
+  /** True for vertical Shorts — drives portrait rendering in the Shorts view. */
+  isShort?: boolean;
 }
 
-export interface ScrapedComment {
-  id: string;
-  author: string;
-  text: string;
-  likes?: string;
-  published?: string;
-  avatar?: string;
-  replies?: number;
-}
-
-export interface CommentsResult {
-  comments: ScrapedComment[];
-  nextPageToken?: string;
-}
+// NOTE: comments and description parsing have been intentionally removed from
+// PicoTube per the product spec. The watch view no longer shows comments or
+// long-form descriptions; the catalog/search endpoints never returned them
+// either, so this scraper is now a strict superset of catalog + RSS.
 
 const BROWSER_HEADERS = {
   "User-Agent":
@@ -314,9 +305,17 @@ function parseVideoRenderer(vr: any, fallbackCategory?: VideoCategory): ScrapedV
     }
     const thumb = vr.thumbnail?.thumbnails?.slice(-1)[0]?.url;
 
-    // Skip playlists / shorts labeled as such
+    // Detect Shorts — YouTube tags them with a "SHORTS" style on the
+    // thumbnail overlay. Keep them in the regular pool but flag them so
+    // the Shorts view can pick them out.
+    let isShort = false;
     if (vr.thumbnailOverlays?.some?.((o: any) => o.thumbnailOverlayTimeStatusRenderer?.style === "SHORTS")) {
-      // We'll still include Shorts but flag via category
+      isShort = true;
+    }
+    // A duration like "0:15" is also a strong signal for Shorts.
+    if (duration && /^\d+:\d{2}$/.test(duration) && parseInt(duration.split(":")[0], 10) < 1) {
+      // < 1 minute → very likely a Short
+      isShort = true;
     }
 
     return {
@@ -329,6 +328,7 @@ function parseVideoRenderer(vr: any, fallbackCategory?: VideoCategory): ScrapedV
       views,
       uploaded,
       thumbnail: thumb,
+      isShort,
     };
   } catch {
     return null;
@@ -485,7 +485,8 @@ export async function fetchVideoMetadata(videoId: string): Promise<ScrapedVideo 
     duration,
     views,
     thumbnail: details.thumbnail?.thumbnails?.slice(-1)[0]?.url,
-    description: details.shortDescription || "",
+    // Detect Shorts by lengthSeconds < 60 — YouTube Shorts are <= 60s.
+    isShort: details.lengthSeconds ? parseInt(details.lengthSeconds, 10) <= 60 : false,
   };
 }
 
@@ -649,176 +650,109 @@ async function callInnertube(
 }
 
 /**
- * Fetch top-level comments for a YouTube video.
+ * Fetch YouTube Shorts for the Shorts feed.
  *
  * Strategy:
- *  1. Scrape the watch page to find the comments-section continuation token
- *     embedded in `ytInitialData`.
- *  2. Call the InnerTube `/next` endpoint with that token to get the actual
- *     comments (YouTube loads comments lazily via this API).
+ *   1. Hit YouTube's trending-shorts endpoint (region=US by default).
+ *   2. Fall back to scraping /hashtag/shorts if that fails.
+ *   3. As a last resort, search "#shorts" and filter for vertical/short videos.
  *
- * Returns up to ~20 comments plus an optional `nextPageToken` for pagination.
+ * Shorts are returned as ScrapedVideo with `isShort=true`. The Shorts view
+ * renders them in a vertical TikTok-style snap-scroll pager.
+ *
+ * Pagination: `page` is 1-indexed; for now we return a single page (YouTube's
+ * trending-shorts shelf doesn't expose a clean continuation token via the
+ * public page). Subsequent pages fall through to the "#shorts" search with
+ * `&page=N` for variety.
  */
-export async function fetchVideoComments(
-  videoId: string,
-  opts: { limit?: number; continuationToken?: string } = {},
-): Promise<CommentsResult> {
-  const limit = Math.min(opts.limit ?? 20, 50);
+export async function fetchShorts(opts: { limit?: number; page?: number } = {}): Promise<ScrapedVideo[]> {
+  const limit = Math.min(opts.limit ?? 30, 50);
+  const page = Math.max(1, opts.page ?? 1);
 
-  // If a continuation token was supplied, fetch the next page directly.
-  let token = opts.continuationToken;
-  if (!token) {
-    // Otherwise, scrape the watch page to find the comments-section token.
-    const url = `https://www.youtube.com/watch?v=${videoId}`;
-    const data = await fetchYtInitialData(url);
-    if (!data) return { comments: [] };
-    token = findCommentsToken(data);
-    if (!token) return { comments: [] };
-  }
-
-  const response = await callInnertube("next", {
-    continuation: token,
-    context: INNERTUBE_CONTEXT,
-  });
-  if (!response) return { comments: [] };
-
-  const comments = parseComments(response, limit);
-  const nextPageToken = findContinuationToken(response);
-  return { comments, nextPageToken };
-}
-
-/** Find the comments-section continuation token in ytInitialData. */
-function findCommentsToken(obj: any): string | undefined {
-  if (!obj || typeof obj !== "object") return undefined;
-
-  // Look for itemSectionRenderer with sectionIdentifier "comment-item-section"
-  // — that's where YouTube puts the comments continuation token.
-  if (Array.isArray(obj)) {
-    for (const v of obj) {
-      const t = findCommentsToken(v);
-      if (t) return t;
-    }
-    return undefined;
-  }
-  if (obj.itemSectionRenderer?.sectionIdentifier === "comment-item-section") {
-    const token = findContinuationToken(obj.itemSectionRenderer);
-    if (token) return token;
-  }
-  for (const v of Object.values(obj)) {
-    const t = findCommentsToken(v);
-    if (t) return t;
-  }
-  return undefined;
-}
-
-/** Parse comments out of an InnerTube response.
- *
- * Modern YouTube (2024+) uses an entity-batch pattern: the actual comment
- * data lives in `frameworkUpdates.entityBatchUpdate.mutations[].payload
- * .commentEntityPayload`, while the `commentThreadRenderer` items only hold
- * a `commentKey` that references the entity payload by its `key`.
- *
- * We collect all `commentEntityPayload` objects (each one has commentId,
- * content, author, likes, etc.) — preserving their array order, which
- * matches display order.
- */
-function parseComments(response: any, limit: number): ScrapedComment[] {
-  const out: ScrapedComment[] = [];
-  const seen = new Set<string>();
-
-  // 1. Try the modern entity-batch format first.
-  const mutations =
-    response?.frameworkUpdates?.entityBatchUpdate?.mutations ?? [];
-  for (const m of mutations) {
-    const cep = m?.payload?.commentEntityPayload;
-    if (!cep) continue;
-    const c = parseCommentEntity(cep);
-    if (c && !seen.has(c.id)) {
-      seen.add(c.id);
-      out.push(c);
-    }
-    if (out.length >= limit) break;
-  }
-  if (out.length > 0) return out;
-
-  // 2. Fall back to legacy commentThreadRenderer walk (older YouTube layout).
-  function walk(obj: any) {
-    if (!obj || typeof obj !== "object") return;
-    if (Array.isArray(obj)) {
-      for (const v of obj) walk(v);
-      return;
-    }
-    if (obj.commentThreadRenderer) {
-      const c = parseOneComment(obj.commentThreadRenderer);
-      if (c && !seen.has(c.id)) {
-        seen.add(c.id);
-        out.push(c);
+  // 1. Trending Shorts shelf — first page only.
+  if (page === 1) {
+    try {
+      // The trending shorts shelf is reachable at /feed/trending?bp=4gINGgt5dG1hX2NoYXJ0X2J5dGVtX3Nob3J0cw==
+      // (the "Shorts" tab on the trending page).
+      const url = "https://www.youtube.com/feed/trending?bp=4gINGgt5dG1hX2NoYXJ0X2J5dGVtX3Nob3J0cw%3D%3D";
+      const data = await fetchYtInitialData(url);
+      if (data) {
+        // Walk the tree for reelItemRenderer — that's YouTube's Shorts card.
+        const shorts = findReelItems(data);
+        if (shorts.length > 0) return shorts.slice(0, limit);
       }
-      return;
+    } catch {
+      // fall through
     }
-    for (const v of Object.values(obj)) walk(v);
   }
-  walk(response);
-  return out.slice(0, limit);
+
+  // 2. Fallback: search "#shorts" and filter for short videos.
+  try {
+    const results = await searchYouTube("#shorts", { limit: limit * 2, page });
+    const shortsOnly = results.filter((v) => v.isShort || (v.duration && /^\d+:\d{2}$/.test(v.duration) && parseInt(v.duration.split(":")[0], 10) < 1));
+    if (shortsOnly.length > 0) return shortsOnly.slice(0, limit);
+    // If we couldn't detect Shorts explicitly, return the search results
+    // with isShort forced true (they came from #shorts so they're Shorts).
+    return results.map((v) => ({ ...v, isShort: true })).slice(0, limit);
+  } catch {
+    return [];
+  }
 }
 
-/** Parse a `commentEntityPayload` (modern YouTube format). */
-function parseCommentEntity(cep: any): ScrapedComment | null {
-  try {
-    const id = cep.properties?.commentId;
-    if (!id) return null;
-    // content can be { content: "..." } or { runs: [...] } — handle both.
-    const contentField = cep.properties?.content;
-    let text = "";
-    if (typeof contentField === "string") text = contentField;
-    else if (contentField?.content) text = contentField.content;
-    else if (contentField?.runs) {
-      text = contentField.runs.map((r: any) => r?.text || "").join("");
+/** Walk a JSON tree and collect reelItemRenderer / shortsLockupViewModel items. */
+function findReelItems(obj: any, acc: ScrapedVideo[] = [], seen: Set<string> = new Set()): ScrapedVideo[] {
+  if (!obj || typeof obj !== "object") return acc;
+  if (Array.isArray(obj)) {
+    for (const v of obj) findReelItems(v, acc, seen);
+    return acc;
+  }
+  // Classic Shorts renderer.
+  if (obj.reelItemRenderer) {
+    const r = obj.reelItemRenderer;
+    const id = r.videoId;
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      acc.push({
+        id,
+        title: getText(r.headline) || "Short",
+        channel: getText(r.shortBylineText) || "YouTube Short",
+        channelId: r.shortBylineText?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId,
+        category: "Live", // arbitrary — Shorts don't fit our category enum well
+        thumbnail: r.thumbnail?.thumbnails?.slice(-1)[0]?.url,
+        isShort: true,
+        views: getText(r.viewCountText),
+      });
     }
-    const author = cep.author?.displayName || "Anonymous";
-    const avatar = cep.author?.avatarThumbnailUrl;
-    const likes = cep.toolbar?.likeCountNotliked || undefined;
-    const published = cep.properties?.publishedTime || undefined;
-    const replies = cep.toolbar?.replyCount
-      ? parseInt(cep.toolbar.replyCount, 10)
-      : undefined;
-    return { id, author, text, likes, published, avatar, replies };
-  } catch {
-    return null;
   }
+  // Newer Shorts lockup view.
+  if (obj.shortsLockupViewModel) {
+    const sl = obj.shortsLockupViewModel;
+    const id = sl.entityId?.replace(/^shorts./, "") || sl.onTap?.innertubeCommand?.reelWatchEndpoint?.videoId;
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      const thumb = sl.thumbnail?.sources?.slice(-1)[0]?.url;
+      acc.push({
+        id,
+        title: sl.overlayMetadata?.primaryText?.content || "Short",
+        channel: "YouTube Short",
+        category: "Live",
+        thumbnail: thumb,
+        isShort: true,
+        views: sl.overlayMetadata?.secondaryText?.content,
+      });
+    }
+  }
+  for (const v of Object.values(obj)) findReelItems(v, acc, seen);
+  return acc;
 }
 
-function parseOneComment(ctr: any): ScrapedComment | null {
-  try {
-    const c = ctr.comment?.commentRenderer || ctr.comment;
-    if (!c) return null;
-    const id = c.commentId;
-    if (!id) return null;
-    const author = getText(c.authorText) || "Anonymous";
-    const text = getText(c.contentText) || "";
-    const likes = getText(c.voteCount) || undefined;
-    const published = getText(c.publishedTimeText) || undefined;
-    const avatar = c.authorThumbnail?.thumbnails?.slice(-1)[0]?.url;
-    const replies = ctr.comment?.commentRenderer?.replyCount
-      ? ctr.comment.commentRenderer.replyCount
-      : undefined;
-    return { id, author, text, likes, published, avatar, replies };
-  } catch {
-    return null;
-  }
-}
-
-function parseOneCommentEntity(cep: any): ScrapedComment | null {
-  try {
-    const id = cep.properties?.commentId;
-    if (!id) return null;
-    const author = getText(cep.author?.name) || "Anonymous";
-    const text = getText(cep.properties?.content) || "";
-    const likes = getText(cep.toolbar?.likeCountNotliked) || undefined;
-    const published = getText(cep.properties?.publishedTime) || undefined;
-    const avatar = cep.author?.avatar?.thumbnails?.slice(-1)[0]?.url;
-    return { id, author, text, likes, published, avatar };
-  } catch {
-    return null;
-  }
-}
+// NOTE: The following comment-related functions have been removed per the
+// product spec. PicoTube no longer shows comments on the watch page.
+//   - fetchVideoComments
+//   - findCommentsToken
+//   - parseComments
+//   - parseCommentEntity
+//   - parseOneComment
+//   - parseOneCommentEntity
+// The `findContinuationToken` helper is kept because it's used for related
+// videos pagination.

@@ -5,28 +5,19 @@ import { VideoGrid } from "./video-grid";
 import { CategoryChips } from "./category-chips";
 import { useAppStore } from "@/store/app-store";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
+import { apiClient } from "@/lib/api-client";
 import { SearchX, Loader2 } from "lucide-react";
-import { Fragment } from "react";
+import { Fragment, useMemo } from "react";
 import type { VideoMeta } from "@/store/app-store";
 
-interface ApiVideo {
-  id: string;
-  title: string;
-  channel: string;
-  category: string;
-  duration?: string;
-  views?: string;
-  uploaded?: string;
-  thumbnail?: string;
-}
-
 interface SearchResponse {
-  videos: ApiVideo[];
+  videos: VideoMeta[];
   source: string;
   query?: string;
   category?: string;
   page: number;
   error?: string;
+  hasMore?: boolean;
 }
 
 const PAGE_SIZE = 24;
@@ -44,27 +35,46 @@ export function SearchView({ query }: { query: string }) {
     isFetchingNextPage,
   } = useInfiniteQuery<SearchResponse>({
     queryKey: ["search", query, activeCategory],
-    queryFn: async ({ pageParam }) => {
+    queryFn: async ({ pageParam, allPages }) => {
+      const loadedPages = (allPages as SearchResponse[]) || [];
+      const seenIds: string[] = [];
+      for (const p of loadedPages) {
+        for (const v of p.videos) seenIds.push(v.id);
+      }
+
       const page = pageParam as number;
-      const params = new URLSearchParams({
+      return apiClient().search({
         q: query,
         category: activeCategory,
-        limit: String(PAGE_SIZE),
-        page: String(page),
+        limit: PAGE_SIZE,
+        page,
+        except: seenIds,
       });
-      const res = await fetch(`/api/search?${params.toString()}`);
-      if (!res.ok) throw new Error("Search failed");
-      return res.json();
     },
     enabled: query.trim().length > 0,
     initialPageParam: 1,
     getNextPageParam: (last) =>
-      last.videos.length > 0 ? (last.page || 1) + 1 : undefined,
+      last.videos.length > 0 && last.hasMore !== false
+        ? (last.page || 1) + 1
+        : undefined,
     staleTime: 60_000,
   });
 
-  const allVideos: ApiVideo[] = data?.pages?.flatMap((p) => p.videos) ?? [];
-  const firstPage = data?.pages?.[0];
+  const allPages = data?.pages ?? [];
+  const allVideos = useMemo(() => {
+    const seen = new Set<string>();
+    const out: VideoMeta[] = [];
+    for (const p of allPages) {
+      for (const v of p.videos) {
+        if (seen.has(v.id)) continue;
+        seen.add(v.id);
+        out.push(v);
+      }
+    }
+    return out;
+  }, [allPages]);
+
+  const firstPage = allPages[0];
   const source = firstPage?.source;
   const totalShown = allVideos.length;
 
@@ -128,7 +138,7 @@ export function SearchView({ query }: { query: string }) {
               <VideoGrid videos={[]} loading skeletonCount={14} />
             ) : (
               <>
-                {data?.pages?.map((page, i) => (
+                {allPages.map((page, i) => (
                   <Fragment key={i}>
                     {i > 0 && page.videos.length > 0 && (
                       <div className="my-3 border-t border-border/60" />

@@ -1,9 +1,9 @@
 /**
  * PicoTube — global client state.
  *
- * Single-page navigation: `view` switches between home, search, and watch.
- * The URL hash is updated so the user can share / refresh and land on the
- * same view.
+ * Single-page navigation: `view` switches between home, search, watch,
+ * shorts, library sections, and playlist detail. The URL hash is updated
+ * so the user can share / refresh and land on the same view.
  *
  * `videoCache` keeps metadata for every video surfaced on home/search so the
  * watch view can render instantly without an extra API call. If a user lands
@@ -30,12 +30,17 @@ export interface VideoMeta {
 export type View =
   | { kind: "home" }
   | { kind: "search"; query: string }
-  | { kind: "watch"; videoId: string };
+  | { kind: "watch"; videoId: string }
+  | { kind: "shorts" }
+  | { kind: "library"; section: "playlists" | "saved" | "liked" | "history" }
+  | { kind: "playlist"; playlistId: string };
 
 interface AppState {
   view: View;
   activeCategory: VideoCategory | "All";
   sidebarOpen: boolean;
+  /** When true the next watch-view keeps the current orientation (landscape stays landscape). */
+  keepLandscape: boolean;
   videoCache: Record<string, VideoMeta>;
   setView: (v: View) => void;
   setActiveCategory: (c: VideoCategory | "All") => void;
@@ -45,13 +50,24 @@ interface AppState {
   goHome: () => void;
   goSearch: (query: string) => void;
   goWatch: (videoId: string, meta?: VideoMeta) => void;
+  goShorts: () => void;
+  goLibrary: (section: "playlists" | "saved" | "liked" | "history") => void;
+  goPlaylist: (playlistId: string) => void;
 }
 
 function writeHash(view: View) {
   if (typeof window === "undefined") return;
   if (view.kind === "home") history.replaceState(null, "", "#/");
-  else if (view.kind === "search") history.replaceState(null, "", `#/search?q=${encodeURIComponent(view.query)}`);
-  else history.replaceState(null, "", `#/watch?v=${view.videoId}`);
+  else if (view.kind === "search")
+    history.replaceState(null, "", `#/search?q=${encodeURIComponent(view.query)}`);
+  else if (view.kind === "watch")
+    history.replaceState(null, "", `#/watch?v=${view.videoId}`);
+  else if (view.kind === "shorts")
+    history.replaceState(null, "", "#/shorts");
+  else if (view.kind === "library")
+    history.replaceState(null, "", `#/library/${view.section}`);
+  else if (view.kind === "playlist")
+    history.replaceState(null, "", `#/playlist/${view.playlistId}`);
   window.scrollTo({ top: 0, behavior: "auto" });
 }
 
@@ -66,6 +82,21 @@ function readHash(): View {
     const v = new URLSearchParams(h.split("?")[1] || "").get("v") || "";
     if (v) return { kind: "watch", videoId: v };
   }
+  if (h.startsWith("/shorts")) return { kind: "shorts" };
+  if (h.startsWith("/library/")) {
+    const section = h.split("/")[2] as
+      | "playlists"
+      | "saved"
+      | "liked"
+      | "history";
+    if (["playlists", "saved", "liked", "history"].includes(section)) {
+      return { kind: "library", section };
+    }
+  }
+  if (h.startsWith("/playlist/")) {
+    const playlistId = h.split("/")[2];
+    if (playlistId) return { kind: "playlist", playlistId };
+  }
   return { kind: "home" };
 }
 
@@ -73,6 +104,7 @@ export const useAppStore = create<AppState>((set) => ({
   view: typeof window !== "undefined" ? readHash() : { kind: "home" },
   activeCategory: "All",
   sidebarOpen: false,
+  keepLandscape: false,
   videoCache: {},
   setView: (view) => {
     writeHash(view);
@@ -101,10 +133,23 @@ export const useAppStore = create<AppState>((set) => ({
     writeHash({ kind: "watch", videoId });
     set((s) => ({
       view: { kind: "watch", videoId },
-      videoCache: meta && !s.videoCache[videoId]
-        ? { ...s.videoCache, [videoId]: meta }
-        : s.videoCache,
+      videoCache:
+        meta && !s.videoCache[videoId]
+          ? { ...s.videoCache, [videoId]: meta }
+          : s.videoCache,
     }));
+  },
+  goShorts: () => {
+    writeHash({ kind: "shorts" });
+    set({ view: { kind: "shorts" } });
+  },
+  goLibrary: (section) => {
+    writeHash({ kind: "library", section });
+    set({ view: { kind: "library", section } });
+  },
+  goPlaylist: (playlistId) => {
+    writeHash({ kind: "playlist", playlistId });
+    set({ view: { kind: "playlist", playlistId } });
   },
 }));
 

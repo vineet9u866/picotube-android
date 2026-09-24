@@ -52,3 +52,11 @@ prompt
 server.log
 # Skills directory
 /skills/
+# Capacitor — generated at build time. The workflow force-adds the APK to
+# the apk-builds branch (see .github/workflows/build-apk.yml).
+/android/
+/.capacitor/
+
+# Local scratch files
+dev.log
+server.log

@@ -3,7 +3,9 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { YouTubePlayer } from "./youtube-player";
 import { useAppStore, type VideoMeta } from "@/store/app-store";
+import { useLibraryStore } from "@/store/library-store";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
+import { apiClient } from "@/lib/api-client";
 import {
   ArrowLeft,
   Eye,
@@ -14,12 +16,17 @@ import {
   AlertCircle,
   Loader2,
   ThumbsUp,
-  MessageSquare,
-  ChevronDown,
-  ChevronUp,
+  Bookmark,
+  Download,
+  ListPlus,
+  History as HistoryIcon,
+  Check,
 } from "lucide-react";
-import { useState, useMemo, Fragment } from "react";
+import { useState, useMemo, useRef, Fragment, useEffect } from "react";
 import { thumbnailUrl } from "@/lib/youtube-catalog";
+import { AddToPlaylistDialog } from "./add-to-playlist-dialog";
+import { DownloadDialog } from "./download-dialog";
+import { cn } from "@/lib/utils";
 
 interface ApiVideoResponse {
   video: VideoMeta;
@@ -32,39 +39,39 @@ interface RelatedResponse {
   hasMore: boolean;
 }
 
-interface CommentItem {
-  id: string;
-  author: string;
-  text: string;
-  likes?: string;
-  published?: string;
-  avatar?: string;
-  replies?: number;
-}
-
-interface CommentsResponse {
-  comments: CommentItem[];
-  nextPageToken?: string;
-  hasMore: boolean;
+function formatViews(views?: string): string | null {
+  if (!views) return null;
+  // Strip any pre-existing " views" / "views" suffix that YouTube might send
+  // back in the scraped string — the UI adds the word "views" itself.
+  const stripped = String(views).replace(/\s*views?\s*$/i, "").trim();
+  return stripped || null;
 }
 
 export function WatchView({ videoId }: { videoId: string }) {
   const goHome = useAppStore((s) => s.goHome);
   const goWatch = useAppStore((s) => s.goWatch);
+  const keepLandscape = useAppStore((s) => s.keepLandscape);
   const cachedVideo = useAppStore((s) => s.videoCache[videoId]);
   const [copied, setCopied] = useState(false);
-  const [descExpanded, setDescExpanded] = useState(false);
+  const [showPlaylistDialog, setShowPlaylistDialog] = useState(false);
+  const [showDownloadDialog, setShowDownloadDialog] = useState(false);
+
+  // Library store hooks (toggles + state).
+  const isSaved = useLibraryStore((s) => s.isSaved);
+  const isLiked = useLibraryStore((s) => s.isLiked);
+  const toggleSave = useLibraryStore((s) => s.toggleSave);
+  const toggleLike = useLibraryStore((s) => s.toggleLike);
+  const recordWatch = useLibraryStore((s) => s.recordWatch);
+
+  const saved = isSaved(videoId);
+  const liked = isLiked(videoId);
 
   // 1. Fetch video metadata — but only if not already in cache.
   //    The cache is populated when the user clicks a video from home/search,
   //    which is the common case.
   const { data: fetched, isLoading, isError, refetch } = useQuery<ApiVideoResponse>({
     queryKey: ["video", videoId],
-    queryFn: async () => {
-      const res = await fetch(`/api/video/${videoId}`);
-      if (!res.ok) throw new Error("Failed to load video");
-      return res.json();
-    },
+    queryFn: async () => apiClient().video(videoId),
     enabled: !cachedVideo,
     staleTime: 30 * 60 * 1000,
   });
@@ -83,15 +90,11 @@ export function WatchView({ videoId }: { videoId: string }) {
     queryKey: ["related", videoId],
     queryFn: async ({ pageParam }) => {
       const token = pageParam as string | undefined;
-      const url = token
-        ? `/api/related/${videoId}?token=${encodeURIComponent(token)}&limit=20`
-        : `/api/related/${videoId}?limit=20`;
-      const res = await fetch(url);
-      if (!res.ok) return { videos: [], hasMore: false };
-      return res.json();
+      return apiClient().related(videoId, { token, limit: 20 });
     },
     initialPageParam: undefined as string | undefined,
-    getNextPageParam: (last) => (last.hasMore && last.nextToken ? last.nextToken : undefined),
+    getNextPageParam: (last) =>
+      last.hasMore && last.nextToken ? last.nextToken : undefined,
     enabled: !!v?.title,
     staleTime: 5 * 60 * 1000,
   });
@@ -115,39 +118,10 @@ export function WatchView({ videoId }: { videoId: string }) {
     enabled: !!v?.title,
   });
 
-  // 3. Fetch comments via InnerTube API.
-  const {
-    data: commentsData,
-    fetchNextPage: fetchNextComments,
-    hasNextPage: hasNextComments,
-    isFetchingNextPage: isFetchingNextComments,
-  } = useInfiniteQuery<CommentsResponse>({
-    queryKey: ["comments", videoId],
-    queryFn: async ({ pageParam }) => {
-      const token = pageParam as string | undefined;
-      const url = token
-        ? `/api/comments/${videoId}?token=${encodeURIComponent(token)}&limit=20`
-        : `/api/comments/${videoId}?limit=20`;
-      const res = await fetch(url);
-      if (!res.ok) return { comments: [], hasMore: false };
-      return res.json();
-    },
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (last) =>
-      last.hasMore && last.nextPageToken ? last.nextPageToken : undefined,
-    enabled: !!v?.title,
-    staleTime: 5 * 60 * 1000,
-  });
-
-  const comments = commentsData?.pages?.flatMap((p) => p.comments) ?? [];
-  const commentsLoaded = commentsData !== undefined;
-
-  const commentsSentinelRef = useInfiniteScroll<HTMLDivElement>({
-    onLoadMore: () => fetchNextComments(),
-    hasMore: hasNextComments,
-    isLoading: isFetchingNextComments,
-    enabled: !!v?.title,
-  });
+  // Record watch history when video metadata is available.
+  useEffect(() => {
+    if (v?.id) recordWatch(v);
+  }, [v?.id, recordWatch, v]);
 
   function share() {
     const url =
@@ -213,10 +187,7 @@ export function WatchView({ videoId }: { videoId: string }) {
   }
 
   const isLive = v.duration?.toUpperCase() === "LIVE" || v.category === "Live";
-  const description = v.description?.trim() || "";
-  const isLongDesc = description.length > 200;
-  const shownDesc =
-    descExpanded || !isLongDesc ? description : description.slice(0, 200) + "…";
+  const views = formatViews(v.views);
 
   return (
     <div className="px-2 py-3 sm:px-3">
@@ -230,14 +201,20 @@ export function WatchView({ videoId }: { videoId: string }) {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_340px] xl:grid-cols-[minmax(0,1fr)_380px]">
         {/* Main player + info */}
         <div className="min-w-0">
-          <YouTubePlayer videoId={v.id} title={v.title} />
+          <YouTubePlayer
+            videoId={v.id}
+            title={v.title}
+            keepLandscape={keepLandscape}
+          />
 
-          <h1 className="mt-2.5 text-sm font-semibold leading-snug sm:text-base">{v.title}</h1>
+          <h1 className="mt-2.5 text-sm font-semibold leading-snug sm:text-base">
+            {v.title}
+          </h1>
 
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-            {v.views && (
+            {views && (
               <span className="inline-flex items-center gap-1">
-                <Eye className="h-3 w-3" /> {v.views} views
+                <Eye className="h-3 w-3" /> {views} views
               </span>
             )}
             {v.uploaded && (
@@ -255,233 +232,219 @@ export function WatchView({ videoId }: { videoId: string }) {
                 <Radio className="h-2.5 w-2.5" /> LIVE
               </span>
             )}
-            <span className="rounded bg-accent px-1.5 py-px text-[10px]">{v.category}</span>
+            <span className="rounded bg-accent px-1.5 py-px text-[10px]">
+              {v.category}
+            </span>
           </div>
 
-          <div className="mt-3 flex items-center gap-2 border-y border-border py-2">
-            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-rose-700 text-[10px] font-bold text-white">
-              {(v.channel || "?").slice(0, 1).toUpperCase()}
+          {/* Channel + Action bar (scrolls horizontally on small screens). */}
+          <div className="mt-3 border-y border-border py-2">
+            <div className="flex items-center gap-2">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-rose-700 text-[10px] font-bold text-white">
+                {(v.channel || "?").slice(0, 1).toUpperCase()}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-medium">
+                  {v.channel || "Unknown channel"}
+                </p>
+                <p className="text-[10px] text-muted-foreground">YouTube channel</p>
+              </div>
             </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-xs font-medium">{v.channel || "Unknown channel"}</p>
-              <p className="text-[10px] text-muted-foreground">YouTube channel</p>
-            </div>
-            <button
-              onClick={share}
-              className="inline-flex items-center gap-1 rounded-full bg-accent px-2.5 py-1 text-[11px] font-medium hover:bg-accent/70 transition-colors"
-            >
-              <Share2 className="h-3 w-3" />
-              {copied ? "Copied!" : "Share"}
-            </button>
-          </div>
 
-          {/* Description box */}
-          {description ? (
-            <div className="mt-3 rounded-md bg-accent/50 p-2.5">
-              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                Description
-              </p>
-              <p className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-foreground/90">
-                {shownDesc}
-              </p>
-              {isLongDesc && (
-                <button
-                  onClick={() => setDescExpanded((x) => !x)}
-                  className="mt-1.5 inline-flex items-center gap-1 text-[10px] font-medium text-rose-600 dark:text-rose-400 hover:underline"
-                >
-                  {descExpanded ? (
-                    <>
-                      Show less <ChevronUp className="h-3 w-3" />
-                    </>
+            {/* Action buttons row — scrollable on narrow screens so nothing
+                gets clipped. The "More" button on the far right scrolls the
+                hidden actions into view. */}
+            <div className="mt-2 flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+              <ActionButton
+                active={liked}
+                onClick={() => toggleLike(v)}
+                icon={
+                  liked ? (
+                    <Check className="h-3.5 w-3.5" />
                   ) : (
-                    <>
-                      Show more <ChevronDown className="h-3 w-3" />
-                    </>
-                  )}
-                </button>
-              )}
+                    <ThumbsUp className="h-3.5 w-3.5" />
+                  )
+                }
+                label={liked ? "Liked" : "Like"}
+              />
+              <ActionButton
+                active={saved}
+                onClick={() => toggleSave(v)}
+                icon={
+                  saved ? (
+                    <Check className="h-3.5 w-3.5" />
+                  ) : (
+                    <Bookmark className="h-3.5 w-3.5" />
+                  )
+                }
+                label={saved ? "Saved" : "Save"}
+              />
+              <ActionButton
+                onClick={() => setShowPlaylistDialog(true)}
+                icon={<ListPlus className="h-3.5 w-3.5" />}
+                label="Playlist"
+              />
+              <ActionButton
+                onClick={() => setShowDownloadDialog(true)}
+                icon={<Download className="h-3.5 w-3.5" />}
+                label="Download"
+              />
+              <ActionButton
+                onClick={share}
+                icon={<Share2 className="h-3.5 w-3.5" />}
+                label={copied ? "Copied!" : "Share"}
+              />
             </div>
-          ) : (
-            <div className="mt-3 rounded-md bg-accent/50 p-2.5 text-[11px] leading-relaxed text-muted-foreground">
-              No description available for this video. PicoTube fetches
-              metadata directly from YouTube&apos;s public watch page — some
-              videos don&apos;t include a description.
-            </div>
-          )}
+          </div>
 
-          {/* Comments section */}
-          <div className="mt-4">
-            <div className="mb-2 flex items-center gap-2">
-              <MessageSquare className="h-3.5 w-3.5 text-muted-foreground" />
-              <h2 className="text-xs font-semibold">Comments</h2>
-              {comments.length > 0 && (
-                <span className="text-[10px] text-muted-foreground">
-                  &middot; showing {comments.length}
-                </span>
-              )}
-            </div>
-
-            {!commentsLoaded ? (
-              <div className="space-y-2">
-                {[0, 1, 2].map((i) => (
-                  <div
-                    key={i}
-                    className="flex gap-2 rounded-md bg-accent/30 p-2 animate-pulse"
-                  >
-                    <div className="h-6 w-6 shrink-0 rounded-full bg-muted" />
-                    <div className="flex-1 space-y-1">
-                      <div className="h-2.5 w-1/4 rounded bg-muted" />
-                      <div className="h-2 w-full rounded bg-muted" />
-                      <div className="h-2 w-3/4 rounded bg-muted" />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : comments.length === 0 ? (
-              <div className="rounded-md bg-accent/40 p-3 text-center text-[11px] text-muted-foreground">
-                No comments available. YouTube may have comments disabled for
-                this video, or they couldn&apos;t be loaded.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {comments.map((c) => (
-                  <div
-                    key={c.id}
-                    className="flex gap-2 rounded-md bg-accent/40 p-2"
-                  >
-                    {c.avatar ? (
-                      <img
-                        src={c.avatar}
-                        alt={c.author}
-                        loading="lazy"
-                        className="h-6 w-6 shrink-0 rounded-full object-cover"
-                        onError={(e) => {
-                          (e.currentTarget.style.display = "none");
-                        }}
-                      />
-                    ) : (
-                      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 to-indigo-700 text-[9px] font-bold text-white">
-                        {(c.author || "?").slice(0, 1).toUpperCase()}
-                      </div>
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline gap-2">
-                        <p className="truncate text-[11px] font-semibold">
-                          {c.author}
-                        </p>
-                        {c.published && (
-                          <span className="text-[10px] text-muted-foreground">
-                            {c.published}
-                          </span>
-                        )}
-                      </div>
-                      <p className="mt-0.5 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-foreground/90">
-                        {c.text}
-                      </p>
-                      <div className="mt-1 flex items-center gap-3 text-[10px] text-muted-foreground">
-                        {c.likes && (
-                          <span className="inline-flex items-center gap-1">
-                            <ThumbsUp className="h-2.5 w-2.5" /> {c.likes}
-                          </span>
-                        )}
-                        {c.replies != null && c.replies > 0 && (
-                          <span>
-                            {c.replies} {c.replies === 1 ? "reply" : "replies"}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-
-                {/* Infinite scroll sentinel for comments */}
-                <div ref={commentsSentinelRef} className="h-8 w-full" aria-hidden />
-
-                {isFetchingNextComments && (
-                  <div className="flex items-center justify-center gap-2 py-2 text-[11px] text-muted-foreground">
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    Loading more comments…
-                  </div>
-                )}
-
-                {!hasNextComments && comments.length > 0 && (
-                  <div className="py-2 text-center text-[10px] text-muted-foreground/60">
-                    End of comments
-                  </div>
-                )}
-              </div>
-            )}
+          {/* Related videos sidebar — fetched from YouTube watch page */}
+          <div className="mt-4 block lg:hidden">
+            <h2 className="mb-2 text-xs font-semibold text-muted-foreground">
+              Up next
+            </h2>
+            <RelatedList
+              related={related}
+              relatedSentinelRef={relatedSentinelRef}
+              isFetchingNextRelated={isFetchingNextRelated}
+              hasNextRelated={hasNextRelated}
+              onPick={(id, meta) => goWatch(id, meta)}
+            />
           </div>
         </div>
 
-        {/* Related videos sidebar — fetched from YouTube watch page */}
-        <div className="min-w-0">
-          <h2 className="mb-2 text-xs font-semibold text-muted-foreground">Related</h2>
-          <div className="flex flex-col gap-2.5">
-            {related.length === 0 && (
-              <p className="text-[11px] text-muted-foreground">Loading related videos…</p>
-            )}
-            {related.map((r) => (
-              <button
-                key={r.id}
-                type="button"
-                onClick={() => goWatch(r.id, r)}
-                className="group flex gap-2 rounded-md p-1 text-left hover:bg-accent/50 transition-colors"
-              >
-                <div className="relative aspect-video w-32 shrink-0 overflow-hidden rounded bg-muted sm:w-36">
-                  <img
-                    src={r.thumbnail || thumbnailUrl(r.id, "mq")}
-                    alt={r.title}
-                    loading="lazy"
-                    className="h-full w-full object-cover transition-transform group-hover:scale-105"
-                    onError={(e) => {
-                      const t = e.currentTarget;
-                      if (!t.dataset.fallback) {
-                        t.dataset.fallback = "1";
-                        t.src = thumbnailUrl(r.id, "hq");
-                      }
-                    }}
-                  />
-                  {r.duration && (
-                    <span className="absolute bottom-1 right-1 rounded bg-black/85 px-1 py-px text-[9px] font-medium text-white">
-                      {r.duration}
-                    </span>
-                  )}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <h3 className="line-clamp-2 text-[11px] font-medium leading-snug group-hover:text-rose-600 dark:group-hover:text-rose-400 transition-colors">
-                    {r.title}
-                  </h3>
-                  <p className="mt-0.5 truncate text-[10px] text-muted-foreground">
-                    {r.channel}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground">
-                    {r.views && <span>{r.views} views</span>}
-                    {r.views && r.uploaded && <span> &middot; </span>}
-                    {r.uploaded && <span>{r.uploaded}</span>}
-                  </p>
-                </div>
-              </button>
-            ))}
-
-            {/* Infinite scroll sentinel for related */}
-            <div ref={relatedSentinelRef} className="h-8 w-full" aria-hidden />
-
-            {isFetchingNextRelated && (
-              <div className="flex items-center justify-center gap-2 py-2 text-[11px] text-muted-foreground">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Loading more…
-              </div>
-            )}
-
-            {!hasNextRelated && related.length > 0 && (
-              <div className="py-2 text-center text-[10px] text-muted-foreground/60">
-                End of related
-              </div>
-            )}
-          </div>
+        {/* Related videos sidebar (desktop) — fetched from YouTube watch page */}
+        <div className="hidden min-w-0 lg:block">
+          <h2 className="mb-2 text-xs font-semibold text-muted-foreground">
+            Up next
+          </h2>
+          <RelatedList
+            related={related}
+            relatedSentinelRef={relatedSentinelRef}
+            isFetchingNextRelated={isFetchingNextRelated}
+            hasNextRelated={hasNextRelated}
+            onPick={(id, meta) => goWatch(id, meta)}
+          />
         </div>
       </div>
+
+      <AddToPlaylistDialog
+        open={showPlaylistDialog}
+        onOpenChange={setShowPlaylistDialog}
+        video={v}
+      />
+      <DownloadDialog
+        open={showDownloadDialog}
+        onOpenChange={setShowDownloadDialog}
+        video={v}
+      />
+    </div>
+  );
+}
+
+interface ActionButtonProps {
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+  active?: boolean;
+}
+
+function ActionButton({ onClick, icon, label, active }: ActionButtonProps) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-medium transition-colors",
+        active
+          ? "bg-rose-600 text-white hover:bg-rose-700"
+          : "bg-accent text-foreground hover:bg-accent/70",
+      )}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+interface RelatedListProps {
+  related: VideoMeta[];
+  relatedSentinelRef: React.RefCallback<HTMLDivElement>;
+  isFetchingNextRelated: boolean;
+  hasNextRelated: boolean;
+  onPick: (id: string, meta: VideoMeta) => void;
+}
+
+function RelatedList({
+  related,
+  relatedSentinelRef,
+  isFetchingNextRelated,
+  hasNextRelated,
+  onPick,
+}: RelatedListProps) {
+  return (
+    <div className="flex flex-col gap-2.5">
+      {related.length === 0 && (
+        <p className="text-[11px] text-muted-foreground">
+          Loading related videos…
+        </p>
+      )}
+      {related.map((r) => (
+        <button
+          key={r.id}
+          type="button"
+          onClick={() => onPick(r.id, r)}
+          className="group flex w-full gap-2 rounded-md p-1 text-left hover:bg-accent/50 transition-colors"
+        >
+          <div className="relative aspect-video w-32 shrink-0 overflow-hidden rounded bg-muted sm:w-36">
+            <img
+              src={r.thumbnail || thumbnailUrl(r.id, "mq")}
+              alt={r.title}
+              loading="lazy"
+              className="h-full w-full object-cover transition-transform group-hover:scale-105"
+              onError={(e) => {
+                const t = e.currentTarget;
+                if (!t.dataset.fallback) {
+                  t.dataset.fallback = "1";
+                  t.src = thumbnailUrl(r.id, "hq");
+                }
+              }}
+            />
+            {r.duration && (
+              <span className="absolute bottom-1 right-1 rounded bg-black/85 px-1 py-px text-[9px] font-medium text-white">
+                {r.duration}
+              </span>
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 className="line-clamp-2 text-[11px] font-medium leading-snug group-hover:text-rose-600 dark:group-hover:text-rose-400 transition-colors">
+              {r.title}
+            </h3>
+            <p className="mt-0.5 truncate text-[10px] text-muted-foreground">
+              {r.channel}
+            </p>
+            <p className="text-[10px] text-muted-foreground">
+              {r.views && <span>{r.views} views</span>}
+              {r.views && r.uploaded && <span> &middot; </span>}
+              {r.uploaded && <span>{r.uploaded}</span>}
+            </p>
+          </div>
+        </button>
+      ))}
+
+      {/* Infinite scroll sentinel for related */}
+      <div ref={relatedSentinelRef} className="h-8 w-full" aria-hidden />
+
+      {isFetchingNextRelated && (
+        <div className="flex items-center justify-center gap-2 py-2 text-[11px] text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          Loading more…
+        </div>
+      )}
+
+      {!hasNextRelated && related.length > 0 && (
+        <div className="py-2 text-center text-[10px] text-muted-foreground/60">
+          End of related
+        </div>
+      )}
     </div>
   );
 }

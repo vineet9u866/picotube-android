@@ -54,14 +54,21 @@ export function watchUrl(id: string): string {
 }
 
 export function embedUrl(id: string, params: Record<string, string | number | boolean> = {}): string {
+  // Sensible defaults: rel=0 + modestbranding + playsinline + iv_load_policy=3
+  // keeps the embed compact, hides end-screen "more videos" overlays that
+  // would otherwise bounce users to youtube.com, and lets the video play
+  // inline on mobile (so PIP / custom fullscreen work).
   const sp = new URLSearchParams({
     rel: "0",
     modestbranding: "1",
     playsinline: "1",
+    iv_load_policy: "3",
     ...Object.fromEntries(
       Object.entries(params).map(([k, v]) => [k, String(v)])
     ),
   });
+  // youtube-nocookie.com is the privacy-friendly variant — no cookies set
+  // unless the user actually plays the video.
   return `https://www.youtube-nocookie.com/embed/${id}?${sp.toString()}`;
 }
 

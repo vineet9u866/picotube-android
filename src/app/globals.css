@@ -118,6 +118,20 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* Use safe-area insets so the layout doesn't get clipped by Android
+       nav bar / iOS notch / Dynamic Island. This fixes the bug in
+       screenshot #3 where the bottom row of videos was cut off by the
+       Android nav bar, and screenshot #1 where the Share button was
+       clipped on the right edge of the screen. */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* Better text rendering on retina screens — small fonts can look fuzzy
+     without this. */
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
 }
 
@@ -128,6 +142,46 @@
   .no-scrollbar {
     -ms-overflow-style: none;
     scrollbar-width: none;
+  }
+}
+
+/* ── Performance optimizations ─────────────────────────────────────────────
+ * These CSS tweaks make the app smooth on low-end devices:
+ *   1. content-visibility:auto on video cards lets the browser skip
+ *      rendering work for off-screen cards.
+ *   2. contain:layout/paint limits the repaint area to the card itself.
+ *   3. will-change:transform on hover-promoted images avoids repaint
+ *      on every animation frame.
+ *   4. backface-visibility:hidden promotes to GPU layer once.
+ */
+.group {
+  content-visibility: auto;
+  contain-intrinsic-size: 220px 220px;
+  contain: layout paint style;
+}
+.group img {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+iframe {
+  /* Don't let a 3rd-party iframe hijack layout. */
+  contain: strict;
+}
+
+/* When a video card is hovered, GPU-promote the image. */
+.group:hover img {
+  will-change: transform;
+}
+
+/* Respect user's reduce-motion preference. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 

@@ -5,24 +5,13 @@ import { VideoGrid } from "./video-grid";
 import { CategoryChips } from "./category-chips";
 import { useAppStore } from "@/store/app-store";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
+import { apiClient } from "@/lib/api-client";
 import { AlertCircle, Loader2 } from "lucide-react";
-import { Fragment } from "react";
+import { Fragment, useMemo } from "react";
 import type { VideoMeta } from "@/store/app-store";
 
-interface ApiVideo {
-  id: string;
-  title: string;
-  channel: string;
-  category: string;
-  duration?: string;
-  views?: string;
-  uploaded?: string;
-  thumbnail?: string;
-  description?: string;
-}
-
 interface CatalogResponse {
-  videos: ApiVideo[];
+  videos: VideoMeta[];
   source: string;
   category?: string;
   page: number;
@@ -45,13 +34,25 @@ export function HomeView() {
     isFetchingNextPage,
   } = useInfiniteQuery<CatalogResponse>({
     queryKey: ["catalog", activeCategory],
-    queryFn: async ({ pageParam }) => {
+    queryFn: async ({ pageParam, allPages }) => {
+      // Collect IDs from all already-loaded pages so the server can dedupe.
+      // This is what prevents the "same video again" bug when infinite
+      // scrolling — even if YouTube returns the same video on a later page
+      // (very common with &page=N), the server filters it out before
+      // returning the next slice.
+      const loadedPages = (allPages as CatalogResponse[]) || [];
+      const seenIds: string[] = [];
+      for (const p of loadedPages) {
+        for (const v of p.videos) seenIds.push(v.id);
+      }
+
       const page = pageParam as number;
-      const res = await fetch(
-        `/api/catalog?category=${encodeURIComponent(activeCategory)}&limit=${PAGE_SIZE}&page=${page}`,
-      );
-      if (!res.ok) throw new Error("Failed to load videos");
-      return res.json();
+      return apiClient().catalog({
+        category: activeCategory,
+        limit: PAGE_SIZE,
+        page,
+        except: seenIds,
+      });
     },
     initialPageParam: 1,
     getNextPageParam: (last) =>
@@ -59,9 +60,21 @@ export function HomeView() {
     staleTime: 60_000,
   });
 
-  // Flatten all pages into a single video list.
-  const allVideos: ApiVideo[] = data?.pages?.flatMap((p) => p.videos) ?? [];
-  const firstPage = data?.pages?.[0];
+  const allPages = data?.pages ?? [];
+  const allVideos = useMemo(() => {
+    const seen = new Set<string>();
+    const out: VideoMeta[] = [];
+    for (const p of allPages) {
+      for (const v of p.videos) {
+        if (seen.has(v.id)) continue;
+        seen.add(v.id);
+        out.push(v);
+      }
+    }
+    return out;
+  }, [allPages]);
+
+  const firstPage = allPages[0];
   const source = firstPage?.source;
   const hasMore = !!hasNextPage;
 
@@ -116,7 +129,7 @@ export function HomeView() {
               <VideoGrid videos={[]} loading skeletonCount={14} />
             ) : (
               <>
-                {data?.pages?.map((page, i) => (
+                {allPages.map((page, i) => (
                   <Fragment key={i}>
                     {i > 0 && page.videos.length > 0 && (
                       <div className="my-3 border-t border-border/60" />
