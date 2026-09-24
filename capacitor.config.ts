@@ -82,6 +82,18 @@ const config: CapacitorConfig = {
       // the splash never lingers if the page loads quickly.
       autoHide: true,
     },
+    // CapacitorHttp: enables native HTTP requests on Android (bypasses
+    // CORS entirely). This is THE critical fix for "Could not load videos"
+    // inside the APK — the WebView can't fetch YouTube HTML directly
+    // (YouTube doesn't send CORS headers), so we route cross-origin
+    // fetches through the native HTTP bridge instead.
+    //
+    // providers.tsx patches window.fetch to detect cross-origin requests
+    // and route them through window.Capacitor.Plugins.CapacitorHttp.
+    // This `enabled: true` flag is what makes that plugin available.
+    CapacitorHttp: {
+      enabled: true,
+    },
     // StatusBar plugin: dark theme by default (matches backgroundColor).
     StatusBar: {
       // Default style: dark background + light content.

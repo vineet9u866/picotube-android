@@ -7,26 +7,65 @@
  *      scrape YouTube directly.
  *   2. Capacitor APK (Android) — the Next.js app is built with
  *      `output: 'export'`, so API routes are stripped. The frontend
- *      has to fetch YouTube data itself, via a CORS proxy (since YouTube
- *      doesn't send CORS headers).
+ *      fetches YouTube data itself. With @capacitor/http installed,
+ *      fetch() is monkey-patched to use native HTTP on Android (no CORS,
+ *      no proxy needed).
  *
  * This module abstracts the choice. Use `apiClient` from the frontend:
  *
  *   const data = await apiClient.catalog({ category: 'All', page: 1 });
  *   const data = await apiClient.search({ q: 'cats', page: 1 });
  *
- * It routes to /api/* on web and to a CORS-proxied YouTube scrape on
- * Capacitor. The implementations are intentionally identical so the UX
- * is the same.
+ * It routes to /api/* on web and to a direct YouTube scrape on
+ * Capacitor (via native HTTP).
  */
 
 import type { VideoCategory } from "@/lib/youtube-catalog";
 
-/** True when the code is running inside a Capacitor native shell (Android/iOS). */
+/**
+ * True when the code is running inside a Capacitor native shell (Android/iOS).
+ *
+ * Capacitor 6 sets `window.Capacitor.isNative` as a BOOLEAN (not a function).
+ * Older versions and some plugins may expose it as a function — we handle
+ * both cases. We also fall back to `getPlatform() !== 'web'` for extra
+ * robustness (some Capacitor versions expose only that).
+ *
+ * Previous bug: we called `w.Capacitor.isNative()` which throws
+ * "isNative is not a function" because isNative is a boolean. That
+ * exception propagated up to React Query's queryFn, which caught it
+ * and rendered "Could not load videos". This is why the APK was
+ * broken even though the build succeeded.
+ */
 export function isCapacitor(): boolean {
   if (typeof window === "undefined") return false;
   const w = window as any;
-  return !!(w.Capacitor && w.Capacitor.isNative && w.Capacitor.isNative());
+  if (!w) return false;
+  if (!w.Capacitor) return false;
+
+  // Primary: isNative as boolean (Capacitor 6+).
+  if (typeof w.Capacitor.isNative === "boolean") return w.Capacitor.isNative;
+
+  // Backwards compat: isNative as function (older Capacitor).
+  if (typeof w.Capacitor.isNative === "function") {
+    try {
+      return !!w.Capacitor.isNative();
+    } catch {
+      // ignore
+    }
+  }
+
+  // Fallback: getPlatform() returns 'android' | 'ios' | 'web'.
+  if (typeof w.Capacitor.getPlatform === "function") {
+    try {
+      return w.Capacitor.getPlatform() !== "web";
+    } catch {
+      // ignore
+    }
+  }
+
+  // Last-resort: if window.Capacitor exists but we can't determine
+  // platform, assume native (Capacitor isn't loaded on regular web).
+  return !!w.Capacitor.isNative;
 }
 
 /** True on the server (Node.js). */
@@ -35,40 +74,68 @@ export function isServer(): boolean {
 }
 
 /**
- * CORS proxy URL builder. We use `api.allorigins.win` as a primary proxy
- * (free, reliable, supports CORS) and fall back to `corsproxy.io`.
+ * Fetch a URL. In Capacitor native mode, `@capacitor/http` is imported in
+ * providers.tsx so window.fetch is monkey-patched to use native HTTP —
+ * this bypasses CORS entirely (no proxy needed). On web, we fall back to
+ * a CORS proxy because YouTube doesn't send CORS headers.
  *
- * The proxy URL is wrapped so YouTube sees a request from the proxy, not
- * from the user's browser — YouTube doesn't send CORS headers so direct
- * fetches from a browser would fail.
+ * We try in this order:
+ *   1. Direct fetch (works natively via @capacitor/http; fails on web
+ *      with CORS error)
+ *   2. CORS proxies (works on both web and native)
  */
-const CORS_PROXIES = [
-  (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  (url: string) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-  (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
-];
+async function fetchHtml(url: string): Promise<string> {
+  // 1. Try direct fetch first. On Capacitor native, this is native HTTP
+  //    via @capacitor/http (no CORS, no proxy). On web it fails with a
+  //    CORS error and we fall through to step 2.
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+    if (res.ok) {
+      const text = await res.text();
+      // Sanity check — make sure we got HTML back (not an error page).
+      if (text.length > 1000) return text;
+    }
+  } catch {
+    // CORS error on web, or network error — fall through to proxy.
+  }
 
-async function fetchWithProxy(targetUrl: string, init?: RequestInit): Promise<Response> {
-  // Try each proxy in turn until one works.
-  for (const wrap of CORS_PROXIES) {
+  // 2. Fall back to CORS proxies. Each proxy is tried in turn.
+  const PROXIES = [
+    (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    (u: string) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+    (u: string) => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(u)}`,
+    (u: string) => `https://thingproxy.freeboard.io/fetch/${u}`,
+    (u: string) => `https://cors.eu.org/${u}`,
+  ];
+
+  let lastErr: any = null;
+  for (const wrap of PROXIES) {
     try {
-      const res = await fetch(wrap(targetUrl), init);
-      if (res.ok) return res;
-    } catch {
-      // try next
+      const res = await fetch(wrap(url), {
+        headers: {
+          "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        },
+      });
+      if (res.ok) {
+        const text = await res.text();
+        if (text.length > 1000) return text;
+      }
+    } catch (e) {
+      lastErr = e;
+      // try next proxy
     }
   }
-  throw new Error("All CORS proxies failed");
-}
-
-async function fetchYtHtmlViaProxy(url: string): Promise<string> {
-  const res = await fetchWithProxy(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
-  return res.text();
+  throw new Error(
+    `Could not fetch ${url} (direct + ${PROXIES.length} proxies all failed)${
+      lastErr ? `: ${lastErr.message || lastErr}` : ""
+    }`,
+  );
 }
 
 /** Extract a JSON object from an HTML page starting after one of the regexes. */
@@ -190,16 +257,19 @@ function parseVideoRenderer(vr: any, fallbackCategory?: VideoCategory): ScrapedV
   } catch { return null; }
 }
 
-// ── Client-side YouTube scrapers (used only inside Capacitor) ───────────
+// ── Client-side YouTube scrapers (used inside the APK) ───────────────
 
-async function clientSearchYouTube(query: string, opts: { limit?: number; category?: VideoCategory | "All"; page?: number } = {}): Promise<ScrapedVideoClient[]> {
+async function clientSearchYouTube(
+  query: string,
+  opts: { limit?: number; category?: VideoCategory | "All"; page?: number } = {},
+): Promise<ScrapedVideoClient[]> {
   const limit = Math.min(opts.limit ?? 30, 50);
   const page = Math.max(1, opts.page ?? 1);
   const trimmed = query.trim();
   if (!trimmed) return [];
   let url = `https://www.youtube.com/results?search_query=${encodeURIComponent(trimmed)}`;
   if (page > 1) url += `&page=${page}`;
-  const html = await fetchYtHtmlViaProxy(url);
+  const html = await fetchHtml(url);
   const data = extractJson(html, [
     /window\["ytInitialData"\]\s*=\s*/,
     /ytInitialData\s*=\s*/,
@@ -220,7 +290,7 @@ async function clientSearchYouTube(query: string, opts: { limit?: number; catego
 
 async function clientFetchTrending(limit: number): Promise<ScrapedVideoClient[]> {
   try {
-    const html = await fetchYtHtmlViaProxy("https://www.youtube.com/feed/trending");
+    const html = await fetchHtml("https://www.youtube.com/feed/trending");
     const data = extractJson(html, [
       /window\["ytInitialData"\]\s*=\s*/,
       /ytInitialData\s*=\s*/,
@@ -243,23 +313,20 @@ async function clientFetchTrending(limit: number): Promise<ScrapedVideoClient[]>
 }
 
 async function clientFetchShorts(limit: number, page: number): Promise<ScrapedVideoClient[]> {
-  // Trending Shorts shelf (page 1).
   if (page === 1) {
     try {
       const url = "https://www.youtube.com/feed/trending?bp=4gINGgt5dG1hX2NoYXJ0X2J5dGVtX3Nob3J0cw%3D%3D";
-      const html = await fetchYtHtmlViaProxy(url);
+      const html = await fetchHtml(url);
       const data = extractJson(html, [
         /window\["ytInitialData"\]\s*=\s*/,
         /ytInitialData\s*=\s*/,
       ]);
       if (data) {
-        // Walk for reelItemRenderer + shortsLockupViewModel.
         const shorts = findReelItems(data);
         if (shorts.length > 0) return shorts.slice(0, limit);
       }
     } catch {}
   }
-  // Fallback: search #shorts.
   const results = await clientSearchYouTube("#shorts", { limit: limit * 2, page });
   const shortsOnly = results.filter((v) => v.isShort || (v.duration && /^\d+:\d{2}$/.test(v.duration) && parseInt(v.duration.split(":")[0], 10) < 1));
   if (shortsOnly.length > 0) return shortsOnly.slice(0, limit);
@@ -311,7 +378,7 @@ function findReelItems(obj: any, acc: ScrapedVideoClient[] = [], seen: Set<strin
 async function clientFetchRelated(videoId: string, limit: number): Promise<ScrapedVideoClient[]> {
   try {
     const url = `https://www.youtube.com/watch?v=${videoId}`;
-    const html = await fetchYtHtmlViaProxy(url);
+    const html = await fetchHtml(url);
     const data = extractJson(html, [
       /window\["ytInitialData"\]\s*=\s*/,
       /ytInitialData\s*=\s*/,
@@ -334,7 +401,7 @@ async function clientFetchRelated(videoId: string, limit: number): Promise<Scrap
 async function clientFetchVideoMetadata(videoId: string): Promise<ScrapedVideoClient | null> {
   try {
     const url = `https://www.youtube.com/watch?v=${videoId}`;
-    const html = await fetchYtHtmlViaProxy(url);
+    const html = await fetchHtml(url);
     const data = extractJson(html, [
       /window\["ytInitialPlayerResponse"\]\s*=\s*/,
       /ytInitialPlayerResponse\s*=\s*/,
@@ -384,18 +451,10 @@ async function clientFetchSuggestions(q: string, limit: number): Promise<string[
     // Suggestions endpoint actually does support CORS in some cases — try direct first.
     let text: string;
     try {
-      const res = await fetch(target, {
-        headers: { "Accept": "text/plain;charset=utf-8" },
-      });
-      if (res.ok) {
-        text = await res.text();
-      } else {
-        const proxyRes = await fetchWithProxy(target);
-        text = await proxyRes.text();
-      }
+      const res = await fetch(target, { headers: { Accept: "text/plain;charset=utf-8" } });
+      text = await res.text();
     } catch {
-      const proxyRes = await fetchWithProxy(target);
-      text = await proxyRes.text();
+      text = await fetchHtml(target);
     }
     const suggestions: string[] = [];
     try {
@@ -431,12 +490,6 @@ async function clientFetchSuggestions(q: string, limit: number): Promise<string[
 }
 
 // ── Unified API client ─────────────────────────────────────────────────
-//
-// On web (dev / hosted Next.js): uses `/api/*` server routes.
-// In Capacitor (APK): uses client-side scrapers via CORS proxy.
-//
-// The shape of every response is identical to the server-side API so the
-// frontend components don't need to know which path they're on.
 
 export interface ApiClient {
   catalog(opts: {
@@ -509,7 +562,6 @@ const capacitorApi: ApiClient = {
         };
       }
     }
-    // Page 2+ in capacitor mode — fall back to search for popular query.
     if (page > 1) {
       const results = await clientSearchYouTube("trending", { limit, page });
       const filtered = results.filter((v) => !except.includes(v.id));
@@ -574,9 +626,6 @@ const capacitorApi: ApiClient = {
   },
 
   async related(videoId, { limit = 20, token }) {
-    // We don't support InnerTube continuation in capacitor mode (the API
-    // doesn't support CORS even through the proxies we use). The first
-    // page from the watch-page scrape is the only page.
     if (token) return { videos: [], hasMore: false };
     const videos = await clientFetchRelated(videoId, limit);
     return { videos, hasMore: false };
@@ -599,14 +648,13 @@ const capacitorApi: ApiClient = {
   },
 
   async download({ url, quality }) {
-    // In capacitor mode we use the public Cobalt API directly (with CORS).
     const QUALITY_MAP: Record<string, string> = {
       "144p": "144", "240p": "240", "360p": "360",
       "480p": "480", "720p": "720", "1080p": "1080",
     };
     const q = QUALITY_MAP[quality] || "720";
     try {
-      // Public Cobalt instance supports CORS.
+      // Cobalt API supports CORS, so direct fetch works.
       const res = await fetch("https://api.cobalt.tools/api/json", {
         method: "POST",
         headers: {
@@ -631,6 +679,12 @@ const capacitorApi: ApiClient = {
 };
 
 // ── Web (Next.js server routes) implementation ──────────────────────────
+//
+// On web (dev / hosted Next.js): tries /api/* first. If the route doesn't
+// exist (which happens when the static export is served by a static host
+// with no API routes), it falls back to capacitorApi (which scrapes
+// YouTube directly via @capacitor/http on Android or CORS proxy on web).
+// This makes the app resilient to misconfigured deployments.
 
 const webApi: ApiClient = {
   async catalog({ category, limit, page, except = [] }) {
@@ -640,9 +694,25 @@ const webApi: ApiClient = {
       page: String(page),
     });
     if (except.length > 0) params.set("except", except.slice(-500).join(","));
-    const res = await fetch(`/api/catalog?${params.toString()}`);
-    if (!res.ok) throw new Error("Failed to load videos");
-    return res.json();
+    try {
+      const res = await fetch(`/api/catalog?${params.toString()}`);
+      if (res.status === 404) {
+        // Route doesn't exist (e.g. static export on a static host).
+        // Fall back to the client-side scraper.
+        return capacitorApi.catalog({ category, limit, page, except });
+      }
+      if (!res.ok) throw new Error("Failed to load videos");
+      return res.json();
+    } catch (e: any) {
+      // Network error or fetch failed — fall back to capacitorApi too.
+      try {
+        return capacitorApi.catalog({ category, limit, page, except });
+      } catch (e2: any) {
+        throw new Error(
+          `webApi.catalog failed (${e?.message || e}) AND fallback failed (${e2?.message || e2})`,
+        );
+      }
+    }
   },
 
   async search({ q, category, limit, page, except = [] }) {
@@ -650,24 +720,57 @@ const webApi: ApiClient = {
       q, category, limit: String(limit), page: String(page),
     });
     if (except.length > 0) params.set("except", except.slice(-500).join(","));
-    const res = await fetch(`/api/search?${params.toString()}`);
-    if (!res.ok) throw new Error("Search failed");
-    return res.json();
+    try {
+      const res = await fetch(`/api/search?${params.toString()}`);
+      if (res.status === 404) {
+        return capacitorApi.search({ q, category, limit, page, except });
+      }
+      if (!res.ok) throw new Error("Search failed");
+      return res.json();
+    } catch (e: any) {
+      try {
+        return capacitorApi.search({ q, category, limit, page, except });
+      } catch (e2: any) {
+        throw new Error(
+          `webApi.search failed (${e?.message || e}) AND fallback failed (${e2?.message || e2})`,
+        );
+      }
+    }
   },
 
   async video(videoId) {
-    const res = await fetch(`/api/video/${videoId}`);
-    if (!res.ok) throw new Error("Failed to load video");
-    return res.json();
+    try {
+      const res = await fetch(`/api/video/${videoId}`);
+      if (res.status === 404) {
+        return capacitorApi.video(videoId);
+      }
+      if (!res.ok) throw new Error("Failed to load video");
+      return res.json();
+    } catch (e: any) {
+      try {
+        return capacitorApi.video(videoId);
+      } catch (e2: any) {
+        throw new Error(
+          `webApi.video failed (${e?.message || e}) AND fallback failed (${e2?.message || e2})`,
+        );
+      }
+    }
   },
 
   async related(videoId, { limit = 20, token }) {
-    const url = token
-      ? `/api/related/${videoId}?token=${encodeURIComponent(token)}&limit=${limit}`
-      : `/api/related/${videoId}?limit=${limit}`;
-    const res = await fetch(url);
-    if (!res.ok) return { videos: [], hasMore: false };
-    return res.json();
+    try {
+      const url = token
+        ? `/api/related/${videoId}?token=${encodeURIComponent(token)}&limit=${limit}`
+        : `/api/related/${videoId}?limit=${limit}`;
+      const res = await fetch(url);
+      if (res.status === 404) {
+        return capacitorApi.related(videoId, { limit, token });
+      }
+      if (!res.ok) return { videos: [], hasMore: false };
+      return res.json();
+    } catch {
+      return capacitorApi.related(videoId, { limit, token });
+    }
   },
 
   async shorts({ limit, page, except = [] }) {
@@ -675,38 +778,71 @@ const webApi: ApiClient = {
       limit: String(limit), page: String(page),
     });
     if (except.length > 0) params.set("except", except.slice(-200).join(","));
-    const res = await fetch(`/api/shorts?${params.toString()}`);
-    if (!res.ok) throw new Error("Failed to load shorts");
-    return res.json();
+    try {
+      const res = await fetch(`/api/shorts?${params.toString()}`);
+      if (res.status === 404) {
+        return capacitorApi.shorts({ limit, page, except });
+      }
+      if (!res.ok) throw new Error("Failed to load shorts");
+      return res.json();
+    } catch (e: any) {
+      try {
+        return capacitorApi.shorts({ limit, page, except });
+      } catch (e2: any) {
+        throw new Error(
+          `webApi.shorts failed (${e?.message || e}) AND fallback failed (${e2?.message || e2})`,
+        );
+      }
+    }
   },
 
   async suggestions(q, limit = 10) {
-    const res = await fetch(`/api/search-suggestions?q=${encodeURIComponent(q)}&limit=${limit}`);
-    if (!res.ok) return { suggestions: [] };
-    return res.json();
+    try {
+      const res = await fetch(`/api/search-suggestions?q=${encodeURIComponent(q)}&limit=${limit}`);
+      if (res.status === 404) {
+        return capacitorApi.suggestions(q, limit);
+      }
+      if (!res.ok) return { suggestions: [] };
+      return res.json();
+    } catch {
+      return capacitorApi.suggestions(q, limit);
+    }
   },
 
   async download({ url, quality }) {
-    const res = await fetch("/api/download", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, quality }),
-    });
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      return { status: "error", error: txt || `HTTP ${res.status}` };
+    try {
+      const res = await fetch("/api/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, quality }),
+      });
+      if (res.status === 404) {
+        return capacitorApi.download({ url, quality });
+      }
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        return { status: "error", error: txt || `HTTP ${res.status}` };
+      }
+      return res.json();
+    } catch (e: any) {
+      // Download can fall back to capacitorApi directly (calls Cobalt).
+      return capacitorApi.download({ url, quality });
     }
-    return res.json();
   },
 };
 
 /**
- * Pick the right API client based on the runtime. Memoized so the choice
- * is made once per session.
+ * Pick the right API client based on the runtime. Re-evaluates on every
+ * call (cheap) so we handle the case where the Capacitor bridge loads
+ * late. Never throws — if detection fails, returns webApi (which has its
+ * own fallback to capacitorApi on 404).
  */
-let cachedClient: ApiClient | null = null;
 export function apiClient(): ApiClient {
-  if (cachedClient) return cachedClient;
-  cachedClient = isCapacitor() ? capacitorApi : webApi;
-  return cachedClient;
+  try {
+    return isCapacitor() ? capacitorApi : webApi;
+  } catch {
+    // If isCapacitor somehow still throws (defensive), use webApi which
+    // has its own fallback to capacitorApi on 404.
+    return webApi;
+  }
 }

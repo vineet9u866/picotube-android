@@ -7,6 +7,7 @@ import { SearchView } from "./search-view";
 import { WatchView } from "./watch-view";
 import { ShortsView } from "./shorts-view";
 import { LibraryView, PlaylistView } from "./library-view";
+import { CapacitorDebugOverlay } from "./debug-overlay";
 import { useAppStore } from "@/store/app-store";
 import { useEffect } from "react";
 
@@ -89,6 +90,7 @@ export function PicoTubeApp() {
           {view.kind === "playlist" && <PlaylistView playlistId={view.playlistId} />}
         </main>
       </div>
+      <CapacitorDebugOverlay />
     </div>
   );
 }

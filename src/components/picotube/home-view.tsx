@@ -28,6 +28,7 @@ export function HomeView() {
     data,
     isLoading,
     isError,
+    error,
     refetch,
     fetchNextPage,
     hasNextPage,
@@ -93,6 +94,14 @@ export function HomeView() {
           <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
             <AlertCircle className="h-8 w-8 text-rose-500" />
             <p className="text-sm text-muted-foreground">Could not load videos.</p>
+            {/* Show the actual error message so the user can tell us what
+                failed — especially useful when the CORS proxy is down or
+                the WebView can't reach YouTube. */}
+            {error && (
+              <p className="max-w-md text-[11px] text-muted-foreground/70 break-words">
+                {String(error?.message || error)}
+              </p>
+            )}
             <button
               onClick={() => refetch()}
               className="rounded-full bg-foreground px-4 py-1.5 text-xs font-medium text-background hover:opacity-90"
