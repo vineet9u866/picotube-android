@@ -108,13 +108,25 @@ jobs:
           rm -rf src/app/api
           NEXT_CONFIG_CAPACITOR=1 bunx next build
 
-      - name: Add Android platform (if missing)
+      - name: Add Android platform (if missing or incomplete)
         run: |
-          if [ ! -d "android" ]; then
+          # `cap add android` creates the full Android project structure
+          # (build.gradle, settings.gradle, gradle wrapper, app/, etc.).
+          # We always run it if android/build.gradle is missing — even if
+          # the android/ directory itself exists, a previous run might
+          # have left it in a partial state.
+          if [ ! -f "android/build.gradle" ]; then
+            rm -rf android
             bunx cap add android
           fi
           # Sync Capacitor plugins + copy web assets into the Android project.
           bunx cap sync android
+          # Sanity-check that build.gradle was created (or existed).
+          test -f android/build.gradle || {
+            echo "ERROR: android/build.gradle still missing after cap add + sync"
+            ls -la android/ 2>&1 || true
+            exit 1
+          }
 
       - name: Apply committed Android patches
         run: |
@@ -153,9 +165,11 @@ jobs:
           echo "=== Top-level build.gradle ==="
           cat android/build.gradle
           echo ""
-          echo "=== gradle-wrapper.properties ==="
-          cat android/gradle/wrapper/gradle-wrapper.properties
-          echo ""
+          if [ -f "android/gradle/wrapper/gradle-wrapper.properties" ]; then
+            echo "=== gradle-wrapper.properties ==="
+            cat android/gradle/wrapper/gradle-wrapper.properties
+            echo ""
+          fi
           echo "=== AndroidManifest.xml ==="
           cat android/app/src/main/AndroidManifest.xml
 
