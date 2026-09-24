@@ -1,5 +1,11 @@
 name: Build PicoTube Android APK
 
+# Grant the auto-generated GITHUB_TOKEN write permission so the workflow
+# can push the APK to the apk-builds branch. Without this, the
+# "Commit APK to /android folder" step fails with a 403 from GitHub.
+permissions:
+  contents: write
+
 on:
   push:
     branches: [main, master]
