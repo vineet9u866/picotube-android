@@ -10,6 +10,17 @@ import { cn } from "@/lib/utils";
 import { AddToPlaylistDialog } from "./add-to-playlist-dialog";
 import { DownloadDialog } from "./download-dialog";
 
+/**
+ * Format a "views" string for display.
+ *
+ * YouTube's scraper sometimes returns strings like "28,183,061 views"
+ * (with the word "views" already in the string). The UI appends " views"
+ * itself, so we strip any pre-existing "views" suffix to avoid "views views".
+ */
+function formatViews(views: string): string {
+  return String(views || "").replace(/\s*views?\s*$/i, "").trim();
+}
+
 interface VideoCardProps {
   video: CatalogVideo | VideoMeta;
   className?: string;
@@ -146,7 +157,7 @@ export function VideoCard({ video, className }: VideoCardProps) {
               {video.channel}
             </p>
             <p className="text-[10px] text-muted-foreground">
-              {video.views && <span>{video.views} views</span>}
+              {video.views && <span>{formatViews(video.views)}</span>}
               {video.views && video.uploaded && <span> &middot; </span>}
               {video.uploaded && <span>{video.uploaded}</span>}
             </p>

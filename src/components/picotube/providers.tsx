@@ -8,24 +8,18 @@ import { ThemeProvider } from "./theme-provider";
  * Capacitor native HTTP patch.
  *
  * In Capacitor 6, HTTP support is built into `@capacitor/core` as the
- * `CapacitorHttp` API. We import it dynamically (only on native) and
- * register the patch. The patch:
- *
- *   1. Replaces `window.fetch` with a wrapper that detects cross-origin
- *      requests to YouTube / YouTube-related URLs and routes them through
- *      the native HTTP plugin (bypassing CORS entirely).
- *   2. Falls back to the original fetch for same-origin / WebView-local
- *      requests.
+ * `CapacitorHttp` API. We enable it via `capacitor.config.ts` and then
+ * patch `window.fetch` here so cross-origin requests (e.g. to
+ * youtube.com) route through the native HTTP bridge (bypassing CORS).
  *
  * Without this, the WebView can't fetch YouTube HTML pages (YouTube
  * doesn't send CORS headers) and the home page shows "Could not load
- * videos".
+ * videos" inside the APK.
  *
- * We dynamically import the Capacitor core to avoid breaking the web
- * build (which doesn't have @capacitor/core installed in dev).
+ * This must be called inside the `Providers` function component because
+ * it uses the `useEffect` hook. (Previous bug: we called it at the top
+ * level of the module, which threw "Invalid hook call".)
  */
-useCapacitorNativeHttp();
-
 function useCapacitorNativeHttp() {
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -57,9 +51,7 @@ function useCapacitorNativeHttp() {
       // The native HTTP bridge isn't subject to CORS.
       try {
         // Capacitor 6: CapacitorHttp is exposed via window.Capacitor.Plugins
-        // OR via dynamic import of @capacitor/core's CapacitorHttp module.
-        // We use the runtime-bridge API (no static import — keeps the web
-        // build free of @capacitor/core as a hard dep).
+        // when enabled in capacitor.config.ts.
         const Http = w.Capacitor.Plugins?.CapacitorHttp
           || w.Capacitor.Plugins?.Http;
         if (Http && typeof Http.request === "function") {
@@ -109,6 +101,10 @@ function useCapacitorNativeHttp() {
 }
 
 export function Providers({ children }: { children: React.ReactNode }) {
+  // Apply the native HTTP patch (no-op on web; routes cross-origin
+  // through CapacitorHttp on Android).
+  useCapacitorNativeHttp();
+
   const [client] = useState(
     () =>
       new QueryClient({

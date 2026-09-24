@@ -422,7 +422,7 @@ function RelatedList({
               {r.channel}
             </p>
             <p className="text-[10px] text-muted-foreground">
-              {r.views && <span>{r.views} views</span>}
+              {r.views && <span>{formatViews(r.views)}</span>}
               {r.views && r.uploaded && <span> &middot; </span>}
               {r.uploaded && <span>{r.uploaded}</span>}
             </p>
