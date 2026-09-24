@@ -17,8 +17,6 @@
  *     becomes the default, foreground service types are stricter) that
  *     would require additional code changes. Bumping targetSdk to 35
  *     is a separate, intentional change for the future.
- *
- * AGP version: 8.6.0+ is required to use compileSdk 35.
  */
 ext {
     minSdkVersion = 23
@@ -26,13 +24,18 @@ ext {
     targetSdkVersion = 34  // ← bump to 35 when ready for Android 15
 
     // androidx library versions — bumped to support SDK 35.
-    androidxActivityVersion = '1.9.0'
-    androidxAppCompatVersion = '1.7.0'
+    androidxActivityVersion = '1.8.0'
+    androidxAppCompatVersion = '1.6.1'
     androidxCoordinatorLayoutVersion = '1.2.0'
     androidxCoreVersion = '1.13.1'
-    androidxFragmentVersion = '1.8.0'
+    androidxFragmentVersion = '1.5.6'
     junitVersion = '4.13.2'
-    androidxJunitVersion = '1.2.1'
-    androidxEspressoCoreVersion = '3.6.1'
+    androidxJunitVersion = '1.1.5'
+    androidxEspressoCoreVersion = '3.5.1'
     cordovaAndroidVersion = '10.1.1'
+
+    // Splash-screen library version (used by @capacitor/splash-screen).
+    // Without this, the default app/build.gradle throws:
+    //   Could not get unknown property 'coreSplashScreenVersion'
+    coreSplashScreenVersion = '1.0.1'
 }
