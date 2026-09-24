@@ -1,0 +1,38 @@
+/**
+ * PicoTube — Android SDK versions + androidx library versions.
+ *
+ * SDK targeting:
+ *   - minSdk = 23  (Capacitor 6 minimum; Android 6.0 / Marshmallow)
+ *   - compileSdk = 35  (build with the Android 15 SDK toolchain — we have
+ *                       access to all the latest APIs at compile time)
+ *   - targetSdk = 34  (Android 14 behavior applies at runtime; bump to 35
+ *                       when ready to opt into Android 15's stricter
+ *                       edge-to-edge, foreground service types, etc.)
+ *
+ * Why split compileSdk and targetSdk:
+ *   - compileSdk 35 lets us call new APIs (e.g. setAutoEnterEnabled on
+ *     PictureInPictureParams, which requires API 34) without warnings.
+ *   - targetSdk 34 keeps the runtime behavior at Android 14. Android 15
+ *     introduces several breaking behavior changes (e.g. edge-to-edge
+ *     becomes the default, foreground service types are stricter) that
+ *     would require additional code changes. Bumping targetSdk to 35
+ *     is a separate, intentional change for the future.
+ *
+ * AGP version: 8.6.0+ is required to use compileSdk 35.
+ */
+ext {
+    minSdkVersion = 23
+    compileSdkVersion = 35
+    targetSdkVersion = 34  // ← bump to 35 when ready for Android 15
+
+    // androidx library versions — bumped to support SDK 35.
+    androidxActivityVersion = '1.9.0'
+    androidxAppCompatVersion = '1.7.0'
+    androidxCoordinatorLayoutVersion = '1.2.0'
+    androidxCoreVersion = '1.13.1'
+    androidxFragmentVersion = '1.8.0'
+    junitVersion = '4.13.2'
+    androidxJunitVersion = '1.2.1'
+    androidxEspressoCoreVersion = '3.6.1'
+    cordovaAndroidVersion = '10.1.1'
+}

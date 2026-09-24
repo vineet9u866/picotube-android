@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PicoTube AndroidManifest.xml (Android 14 + 15 ready).
+
+  Key differences from the default Capacitor manifest:
+
+  1. `android:exported="true"` on MainActivity — required since Android 12
+     for any activity with an intent filter. Without it, install fails
+     with INSTALL_PARSE_FAILED_MANIFEST_MALFORMED on Android 12+.
+
+  2. `android:resizeableActivity="true"` + `android:supportsPictureInPicture="true"`
+     on the application tag — enables PIP. The MainActivity calls
+     setPictureInPictureParams / setAutoEnterEnabled to actually use it.
+
+  3. `android:screenOrientation="fullSensor"` on MainActivity — lets the
+     user freely rotate (we don't force landscape). If the user is in
+     landscape when they switch videos, they stay in landscape.
+
+  4. `android:configChanges="..."` on MainActivity — tells the system NOT
+     to recreate the activity on orientation / keyboard / screen-size
+     changes. Without this, every rotation would reload the WebView
+     (losing the video being played).
+
+  5. Storage permissions are scoped per-Android-version:
+       - READ_EXTERNAL_STORAGE  (maxSdk=32, only Android ≤13)
+       - WRITE_EXTERNAL_STORAGE (maxSdk=29, only Android ≤10)
+       - READ_MEDIA_VIDEO        (Android 13+)
+     We DO NOT request MANAGE_EXTERNAL_STORAGE — Google Play rejects it
+     and it's not needed for downloads (the DownloadManager handles
+     those automatically).
+
+  6. No FOREGROUND_SERVICE permissions — PicoTube doesn't run a media
+     service (the YouTube iframe plays inside the WebView). PIP doesn't
+     need a foreground service either.
+
+  7. `android:hardwareAccelerated="true"` — required for video playback
+     to be smooth in the WebView.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Network: required for the WebView to load YouTube + CORS proxy -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Keep CPU awake during playback (prevents buffering when screen dims) -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Storage: Android 13+ uses scoped READ_MEDIA_VIDEO instead of the
+         legacy READ/WRITE_EXTERNAL_STORAGE. We declare both for backward
+         compat with Android 12 and below. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:hardwareAccelerated="true"
+        android:supportsPictureInPicture="true"
+        android:resizeableActivity="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="fullSensor"
+            android:theme="@style/AppTheme"
+            android:label="@string/title_activity_main"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

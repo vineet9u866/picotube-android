@@ -45,12 +45,13 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK (preinstalled + accept licenses)
+      - name: Setup Android SDK (preinstalled + accept licenses + SDK 35)
         run: |
-          # GitHub's ubuntu-latest runner already has the Android SDK at
-          # /usr/local/lib/android/sdk. We accept all licenses non-interactively
-          # (the auto-accept in android-actions/setup-android@v3 hangs on the
-          # newer XR/TV licenses that require interactive 'y' input).
+          # GitHub's ubuntu-latest runner has the Android SDK at
+          # /usr/local/lib/android/sdk. We accept all licenses non-
+          # interactively (android-actions/setup-android@v3 hangs on the
+          # newer XR/TV licenses that require interactive 'y' input) and
+          # install SDK 35 so we can compile with compileSdk=35.
           export ANDROID_HOME=/usr/local/lib/android/sdk
           export ANDROID_SDK_ROOT=$ANDROID_HOME
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
@@ -58,9 +59,15 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME"
           # Accept all licenses non-interactively.
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
-          # Install the SDK components Capacitor/Gradle need.
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
-          echo "SDK ready."
+          # Install the SDK components Capacitor/Gradle need — including
+          # SDK 35 (Android 15) and SDK 34 (Android 14) for compile/target.
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "platforms;android-35" \
+            "build-tools;34.0.0" \
+            "build-tools;35.0.0" > /dev/null 2>&1 || true
+          echo "SDK ready (incl. SDK 35)."
 
       - name: Configure Gradle
         run: |
@@ -71,6 +78,8 @@ jobs:
           org.gradle.caching=true
           android.useAndroidX=true
           android.enableJetifier=true
+          # Enable Gradle configuration cache for faster subsequent builds.
+          org.gradle.configuration-cache=true
           EOF
 
       - name: Install dependencies
@@ -98,13 +107,7 @@ jobs:
           # is set). The frontend uses client-side fetching via CORS proxy
           # when running inside the APK (see src/lib/api-client.ts), so the
           # server-side API routes aren't needed.
-          #
-          # We delete them BEFORE building so the static export succeeds.
           rm -rf src/app/api
-
-          # Build with the capacitor-specific Next config (output: 'export').
-          # This produces a `out/` directory with static HTML/JS/CSS — no
-          # API routes, no server. Capacitor bundles these files.
           NEXT_CONFIG_CAPACITOR=1 bunx next build
 
       - name: Add Android platform (if missing)
@@ -112,138 +115,50 @@ jobs:
           if [ ! -d "android" ]; then
             bunx cap add android
           fi
-          # Always copy the latest webDir to the Android project.
+          # Sync Capacitor plugins + copy web assets into the Android project.
           bunx cap sync android
 
-      - name: Patch MainActivity for PIP + fullscreen + landscape
+      - name: Apply committed Android patches
         run: |
-          # Inject PIP support + fullscreen + landscape-on-watch into the
-          # Android MainActivity. We do this in the workflow (not in a
-          # committed file) because `cap add android` regenerates the
-          # MainActivity on first run; doing it here means the patch always
-          # applies cleanly.
-          MAIN_ACTIVITY="android/app/src/main/java/com/picotube/net/MainActivity.java"
-          mkdir -p "$(dirname "$MAIN_ACTIVITY")"
-          cat > "$MAIN_ACTIVITY" <<'JAVA'
-          package com.picotube.net;
+          # Replace the auto-generated Android files with our committed
+          # patches (see android-patches/README.md for what each file does).
+          # These patches:
+          #   - Fix Android 14 crashes (PIP feature check, no
+          #     FLAG_LAYOUT_NO_LIMITS, no setPictureInPictureParams in onCreate)
+          #   - Target Android 14 (targetSdk=34) with Android 15 readiness
+          #     (compileSdk=35, AGP 8.6.0, Gradle 8.9)
+          #   - Add proper permissions (scoped storage, no MANAGE_EXTERNAL_STORAGE)
+          #   - Add android:exported="true" to MainActivity (Android 12+ requirement)
+          set -e
+          mkdir -p android/app/src/main/java/com/picotube/net
+          cp android-patches/MainActivity.java \
+             android/app/src/main/java/com/picotube/net/MainActivity.java
+          cp android-patches/AndroidManifest.xml \
+             android/app/src/main/AndroidManifest.xml
+          mkdir -p android/app/src/main/res/values
+          cp android-patches/strings.xml \
+             android/app/src/main/res/values/strings.xml
+          cp android-patches/variables.gradle android/variables.gradle
+          cp android-patches/build.gradle android/build.gradle
+          mkdir -p android/gradle/wrapper
+          cp android-patches/gradle-wrapper.properties \
+             android/gradle/wrapper/gradle-wrapper.properties
+          echo "Applied patches:"
+          ls -la android-patches/
 
-          import android.os.Bundle;
-          import android.app.PictureInPictureParams;
-          import android.util.Rational;
-          import android.view.WindowManager;
-          import android.webkit.WebView;
-          import android.content.res.Configuration;
-          import android.os.Build;
-
-          import com.getcapacitor.BridgeActivity;
-
-          public class MainActivity extends BridgeActivity {
-            @Override
-            public void onCreate(Bundle savedInstanceState) {
-              super.onCreate(savedInstanceState);
-              // Enter fullscreen — hide status + nav bars for true app-like UX.
-              // The PicoTube UI uses safe-area-insets to keep content
-              // visible; this lets the WebView use the full screen.
-              getWindow().setFlags(
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-              );
-
-              // Enable PIP automatically when the user presses Home while a
-              // video is playing. The WebView signals this via the
-              // setPictureInPictureParams API exposed by the plugin.
-              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                PictureInPictureParams params = new PictureInPictureParams.Builder()
-                  .setAspectRatio(new Rational(16, 9))
-                  .build();
-                setPictureInPictureParams(params);
-              }
-            }
-
-            @Override
-            public void onUserLeaveHint() {
-              // Enter PIP when the user presses Home — this is the "only the
-              // video enters PIP" requirement. The whole Activity shrinks
-              // to a small floating window; the WebView inside it
-              // (which is just the YouTube iframe) continues playing.
-              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                try {
-                  PictureInPictureParams params = new PictureInPictureParams.Builder()
-                    .setAspectRatio(new Rational(16, 9))
-                    .build();
-                  enterPictureInPictureMode(params);
-                } catch (Exception e) {
-                  // ignore
-                }
-              }
-            }
-          }
-          JAVA
-
-      - name: Patch AndroidManifest.xml for permissions + features
+      - name: Verify Gradle config (sanity)
         run: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          python3 - <<'PY'
-          import re
-          with open("android/app/src/main/AndroidManifest.xml", "r") as f:
-              m = f.read()
-
-          perms = [
-              "android.permission.INTERNET",
-              "android.permission.ACCESS_NETWORK_STATE",
-              "android.permission.WRITE_EXTERNAL_STORAGE",
-              "android.permission.READ_EXTERNAL_STORAGE",
-              "android.permission.READ_MEDIA_VIDEO",
-              "android.permission.MANAGE_EXTERNAL_STORAGE",
-              "android.permission.WAKE_LOCK",
-              "android.permission.FOREGROUND_SERVICE",
-              "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
-          ]
-          needed = [p for p in perms if f"android.permission.{p.split('.')[-1]}" not in m]
-          # Insert just inside <manifest> after the application tag's predecessor.
-          perm_block = "\n".join(f'    <uses-permission android:name="{p}" />' for p in needed)
-
-          # Add supportsPictureInPicture + configChanges + resizeableActivity
-          # to the <application> tag.
-          m = re.sub(
-              r'(<application[^>]*?)(/?>)',
-              r'\1 android:supportsPictureInPicture="true" android:resizeableActivity="true" android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode" android:hardwareAccelerated="true"\2',
-              m, count=1
-          )
-
-          # Inject permissions before <application>.
-          m = re.sub(
-              r'(\s*<application)',
-              "\n    " + perm_block + r"\1",
-              m, count=1
-          )
-
-          # Insert android:screenOrientation="fullSensor" so the user can
-          # rotate freely (we don't force landscape — but if they're already
-          # in landscape, the next video keeps landscape).
-          m = re.sub(
-              r'(<activity[^>]*?android:name="com.picotube.net.MainActivity"[^>]*?)(/?>)',
-              r'\1 android:screenOrientation="fullSensor" android:launchMode="singleTop"\2',
-              m, count=1
-          )
-
-          with open("android/app/src/main/AndroidManifest.xml", "w") as f:
-              f.write(m)
-          PY
-
-      - name: Patch strings.xml for app name
-        run: |
-          STRINGS="android/app/src/main/res/values/strings.xml"
-          mkdir -p "$(dirname "$STRINGS")"
-          cat > "$STRINGS" <<'XML'
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <string name="app_name">PicoTube</string>
-              <string name="title_activity_main">PicoTube</string>
-              <string name="package_name">com.picotube.net</string>
-              <string name="custom_url_scheme">com.picotube.net</string>
-          </resources>
-          XML
+          echo "=== variables.gradle ==="
+          cat android/variables.gradle
+          echo ""
+          echo "=== Top-level build.gradle ==="
+          cat android/build.gradle
+          echo ""
+          echo "=== gradle-wrapper.properties ==="
+          cat android/gradle/wrapper/gradle-wrapper.properties
+          echo ""
+          echo "=== AndroidManifest.xml ==="
+          cat android/app/src/main/AndroidManifest.xml
 
       - name: Copy PicoTube logo as Android app icon
         run: |
@@ -258,7 +173,7 @@ jobs:
           convert -background none public/icon.png -resize 144x144 /tmp/icons/xxhdpi.png
           convert -background none public/icon.png -resize 192x192 /tmp/icons/xxxhdpi.png
 
-          # Replace the default Android launcher icons.
+          # Replace the default Android launcher icons (both standard and round).
           for s in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
             target="android/app/src/main/res/mipmap-${s}"
             mkdir -p "$target"
@@ -274,7 +189,12 @@ jobs:
         working-directory: android
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          # --no-daemon: avoids state issues in CI
+          # --stacktrace: prints full stack traces on failures
+          # --warning-mode all: shows all deprecation warnings
+          ./gradlew assembleDebug --no-daemon --stacktrace --warning-mode all 2>&1 | tee build-output.log
+          # Surface any deprecation warnings about Android 15 changes.
+          grep -E "DEPRECATION|deprecated|Android 15|targetSdk" build-output.log || true
 
       - name: Find APK
         id: find_apk
@@ -282,10 +202,12 @@ jobs:
           APK=$(find android/app/build/outputs/apk -name "*.apk" -type f | head -1)
           echo "Found APK: $APK"
           echo "apk_path=$APK" >> $GITHUB_OUTPUT
-          # Copy to a known location with a friendly name.
           mkdir -p android/release
           cp "$APK" "android/release/PicoTube-debug.apk"
           echo "apk_release=android/release/PicoTube-debug.apk" >> $GITHUB_OUTPUT
+          echo "=== APK info ==="
+          ls -la android/release/PicoTube-debug.apk
+          file android/release/PicoTube-debug.apk
 
       - name: Upload APK as workflow artifact
         uses: actions/upload-artifact@v4
@@ -308,6 +230,5 @@ jobs:
           mkdir -p android
           cp ${{ steps.find_apk.outputs.apk_release }} android/PicoTube-debug.apk
           git add -f android/PicoTube-debug.apk
-          # Always succeed — commit returns non-zero if there's nothing to commit.
           git commit -m "Update APK (build $(date -u +%Y-%m-%d-%H%M))" || echo "No changes to commit"
           git push origin apk-builds --force-with-lease || true

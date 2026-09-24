@@ -1,0 +1,29 @@
+// PicoTube — top-level (project) build.gradle.
+//
+// AGP 8.6.0 is required for compileSdk 35 (Android 15 tooling).
+// Google services plugin is included so we can add Firebase later if
+// needed (currently unused — no google-services.json is referenced).
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.6.0'
+        classpath 'com.google.gms:google-services:4.4.2'
+    }
+}
+
+apply from: 'capacitor.settings.gradle'
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
