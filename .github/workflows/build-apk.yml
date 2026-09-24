@@ -68,7 +68,7 @@ jobs:
           EOF
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile=false
+        run: bun install
 
       - name: Install Capacitor CLI
         run: bun add -D @capacitor/cli@^6.1.2
