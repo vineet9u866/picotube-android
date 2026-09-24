@@ -13,8 +13,8 @@ this approach keeps the repo small and the patches version-controlled.
 | `AndroidManifest.xml` | `android/app/src/main/AndroidManifest.xml` | Permissions, exported MainActivity (Android 12+ requirement), PIP attributes, scoped storage (Android 13+). |
 | `strings.xml` | `android/app/src/main/res/values/strings.xml` | App name = "PicoTube". |
 | `variables.gradle` | `android/variables.gradle` | `compileSdk=35`, `targetSdk=34` (Android 14 ready, Android 15 ready when bumped). |
-| `build.gradle` | `android/build.gradle` (project-level) | AGP 8.6.0 (required for compileSdk 35). |
-| `gradle-wrapper.properties` | `android/gradle/wrapper/gradle-wrapper.properties` | Gradle 8.9 (required for AGP 8.6.0). |
+| `build.gradle` | `android/build.gradle` (project-level) | AGP 8.5.2 (supports compileSdk 35; compatible with Capacitor 6.1.2's settings.gradle). |
+| `gradle-wrapper.properties` | `android/gradle/wrapper/gradle-wrapper.properties` | Gradle 8.7 (required for AGP 8.5.2). |
 
 ## Why we patch instead of committing `android/`
 
