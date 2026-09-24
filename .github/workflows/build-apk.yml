@@ -39,12 +39,22 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          sdk-platform: 34
-          sdk-build-tools: 34.0.0
-          accept-android-sdk-licenses: true
+      - name: Setup Android SDK (preinstalled + accept licenses)
+        run: |
+          # GitHub's ubuntu-latest runner already has the Android SDK at
+          # /usr/local/lib/android/sdk. We accept all licenses non-interactively
+          # (the auto-accept in android-actions/setup-android@v3 hangs on the
+          # newer XR/TV licenses that require interactive 'y' input).
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          # Accept all licenses non-interactively.
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          # Install the SDK components Capacitor/Gradle need.
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
+          echo "SDK ready."
 
       - name: Configure Gradle
         run: |
